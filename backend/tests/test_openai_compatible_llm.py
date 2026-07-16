@@ -99,7 +99,25 @@ def test_openai_compatible_network_failure_retries_then_succeeds() -> None:
 
     assert result.risk_level == "high"
     assert len(calls["requests"]) == 2
-    assert calls["sleeps"] == [0.5]
+    assert calls["sleeps"] == [1]
+
+
+def test_openai_compatible_remote_protocol_error_retries_then_succeeds() -> None:
+    provider, calls = _provider_with_responses(
+        [
+            httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            ),
+            _chat_response(_draft_json()),
+        ],
+        max_retries=1,
+    )
+
+    result = provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert result.risk_level == "high"
+    assert len(calls["requests"]) == 2
+    assert calls["sleeps"] == [1]
 
 
 def test_openai_compatible_429_retries_then_succeeds() -> None:
@@ -124,7 +142,27 @@ def test_openai_compatible_500_retry_exhaustion() -> None:
         provider.complete_structured(_messages(), AgentDiagnosisDraft)
 
     assert len(calls["requests"]) == 3
-    assert calls["sleeps"] == [0.5, 1.0]
+    assert calls["sleeps"] == [1, 2]
+
+
+def test_openai_compatible_remote_protocol_error_retry_exhaustion() -> None:
+    provider, calls = _provider_with_responses(
+        [
+            httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            ),
+            httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            ),
+        ],
+        max_retries=1,
+    )
+
+    with pytest.raises(LLMUnavailableError):
+        provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert len(calls["requests"]) == 2
+    assert calls["sleeps"] == [1]
 
 
 def test_openai_compatible_401_does_not_retry() -> None:
@@ -216,7 +254,7 @@ def test_openai_compatible_internal_client_is_closed(
 ) -> None:
     created_clients: list[FakeContextClient] = []
 
-    def client_factory() -> FakeContextClient:
+    def client_factory(*args: object, **kwargs: object) -> FakeContextClient:
         client = FakeContextClient([_chat_response(_draft_json())])
         created_clients.append(client)
         return client
@@ -257,7 +295,7 @@ def test_openai_compatible_retry_reuses_same_internal_client(
 ) -> None:
     created_clients: list[FakeContextClient] = []
 
-    def client_factory() -> FakeContextClient:
+    def client_factory(*args: object, **kwargs: object) -> FakeContextClient:
         client = FakeContextClient([httpx.Response(500), _chat_response(_draft_json())])
         created_clients.append(client)
         return client
@@ -278,7 +316,41 @@ def test_openai_compatible_retry_reuses_same_internal_client(
     assert len(created_clients) == 1
     assert created_clients[0].post_count == 2
     assert created_clients[0].closed is True
-    assert sleeps == [0.5]
+    assert sleeps == [1]
+
+
+def test_openai_compatible_internal_client_uses_stability_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+    created_clients: list[FakeContextClient] = []
+
+    def client_factory(*args: object, **kwargs: object) -> FakeContextClient:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        client = FakeContextClient([_chat_response(_draft_json())])
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(openai_compatible_module.httpx, "Client", client_factory)
+    provider = OpenAICompatibleProvider(
+        api_key="test-secret-key",
+        base_url="https://llm.example.test/v1",
+        model="demo-model",
+        timeout_seconds=30,
+    )
+
+    provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    timeout = captured["kwargs"]["timeout"]
+    limits = captured["kwargs"]["limits"]
+    assert timeout.connect == 10.0
+    assert timeout.read == 30
+    assert timeout.write == 10.0
+    assert timeout.pool == 5.0
+    assert limits.max_connections == 10
+    assert limits.max_keepalive_connections == 0
+    assert len(created_clients) == 1
 
 
 def test_factory_creates_openai_compatible_provider(monkeypatch: pytest.MonkeyPatch) -> None:

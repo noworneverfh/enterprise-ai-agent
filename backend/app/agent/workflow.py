@@ -1,3 +1,4 @@
+import logging
 import re
 
 from sqlalchemy.orm import Session
@@ -70,6 +71,7 @@ DISCLAIMER = (
     "\u8bbe\u5907\u5e76\u7531\u4e13\u4e1a\u4eba\u5458\u73b0\u573a\u786e\u8ba4\u3002"
 )
 LLM_UNAVAILABLE_WARNING = "LLM diagnosis unavailable; returned deterministic fallback."
+logger = logging.getLogger(__name__)
 
 
 def parse_agent_query(request: AgentDiagnoseRequest) -> ParsedAgentQuery:
@@ -230,7 +232,12 @@ def run_agent_diagnosis(
             recommended_actions=draft.recommended_actions,
             draft_warnings=draft.warnings,
         )
-    except (LLMTimeoutError, LLMUnavailableError, LLMStructuredOutputError):
+    except (LLMTimeoutError, LLMUnavailableError, LLMStructuredOutputError) as exc:
+        logger.exception(
+            "LLM diagnosis failed; falling back. exception_type=%s exception_message=%s",
+            type(exc).__name__,
+            str(exc),
+        )
         return _build_llm_fallback_response(context)
 
 
@@ -307,15 +314,19 @@ def _build_llm_fallback_response(
 
 
 def _fallback_summary(context: AgentWorkflowContext) -> str:
-    parts = [f"Deterministic fallback for query: {context.request.query}"]
+    parts = [
+        (
+            "当前 AI 诊断服务暂时不可用，以下结果基于设备数据和知识库信息生成。"
+        )
+    ]
     device_result = context.device_tool_result
     if device_result is not None and device_result.ok and device_result.device is not None:
-        parts.append(f"Device: {device_result.device.device_code}.")
+        parts.append(f"设备编号：{device_result.device.device_code}。")
     if device_result is not None and device_result.ok and device_result.recent_alarms:
         alarm_codes = ", ".join(alarm.alarm_code for alarm in device_result.recent_alarms)
-        parts.append(f"Recent alarms: {alarm_codes}.")
+        parts.append(f"近期未解决报警：{alarm_codes}。")
     if context.allowed_sources:
-        parts.append("Knowledge results are available.")
+        parts.append("已检索到相关知识库片段。")
     return " ".join(parts)
 
 

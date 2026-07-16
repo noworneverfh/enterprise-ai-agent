@@ -339,6 +339,8 @@ def test_llm_errors_return_safe_fallback(
     )
 
     assert response.risk_level == "high"
+    assert response.problem_summary.startswith("当前 AI 诊断服务暂时不可用")
+    assert "Deterministic fallback" not in response.problem_summary
     assert response.possible_causes == []
     assert response.sources == ["manual.md#chunk-0"]
     assert workflow.LLM_UNAVAILABLE_WARNING in response.warnings
@@ -346,6 +348,29 @@ def test_llm_errors_return_safe_fallback(
     assert "provider.example" not in serialized
     assert "sk-secret" not in serialized
     assert "stack trace" not in serialized
+
+
+def test_fallback_response_does_not_expose_internal_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_tools(monkeypatch, device_result=_device_result(["high"]))
+    provider = MockLLMProvider(
+        error=LLMUnavailableError(
+            "Server disconnected without sending a response."
+        )
+    )
+
+    response = workflow.run_agent_diagnosis(
+        object(),
+        AgentDiagnoseRequest(query=QUERY_DIAGNOSIS),
+        provider,
+    )
+
+    serialized = response.model_dump_json()
+    assert "当前 AI 诊断服务暂时不可用" in response.problem_summary
+    assert "Server disconnected" not in serialized
+    assert "RemoteProtocolError" not in serialized
+    assert "LLMUnavailableError" not in serialized
 
 
 def test_llm_error_without_tool_data_returns_safe_unknown(

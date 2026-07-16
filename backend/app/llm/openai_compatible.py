@@ -71,7 +71,13 @@ class OpenAICompatibleProvider:
         if self._client is not None:
             response = self._post_with_retries(payload, self._client)
         else:
-            with httpx.Client() as client:
+            with httpx.Client(
+                timeout=self._build_timeout(),
+                limits=httpx.Limits(
+                    max_connections=10,
+                    max_keepalive_connections=0,
+                ),
+            ) as client:
                 response = self._post_with_retries(payload, client)
 
         content = self._extract_content(response)
@@ -182,4 +188,13 @@ class OpenAICompatibleProvider:
         return attempt < total_attempts - 1
 
     def _sleep_before_retry(self, attempt: int) -> None:
-        self._sleep(0.5 * (2**attempt))
+        self._sleep(1 * (2**attempt))
+
+    def _build_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            timeout=self.timeout_seconds,
+            connect=min(10.0, self.timeout_seconds),
+            read=self.timeout_seconds,
+            write=min(10.0, self.timeout_seconds),
+            pool=min(5.0, self.timeout_seconds),
+        )
