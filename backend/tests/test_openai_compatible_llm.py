@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -10,7 +11,8 @@ from pydantic import SecretStr
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-from app.core.config import settings  # noqa: E402
+from app.core.config import BACKEND_DIR as CONFIG_BACKEND_DIR  # noqa: E402
+from app.core.config import Settings, settings  # noqa: E402
 from app.llm.base import (  # noqa: E402
     LLMMessage,
     LLMProviderError,
@@ -19,6 +21,7 @@ from app.llm.base import (  # noqa: E402
     LLMUnavailableError,
 )
 from app.llm.factory import LLMProviderConfigurationError, get_llm_provider  # noqa: E402
+from app.llm import openai_compatible as openai_compatible_module  # noqa: E402
 from app.llm.openai_compatible import OpenAICompatibleProvider  # noqa: E402
 from app.schemas.agent import AgentDiagnosisDraft  # noqa: E402
 
@@ -208,6 +211,76 @@ def test_openai_compatible_repr_and_exceptions_do_not_leak_api_key() -> None:
     assert "very-secret-key" not in str(exc_info.value)
 
 
+def test_openai_compatible_internal_client_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_clients: list[FakeContextClient] = []
+
+    def client_factory() -> FakeContextClient:
+        client = FakeContextClient([_chat_response(_draft_json())])
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(openai_compatible_module.httpx, "Client", client_factory)
+    provider = OpenAICompatibleProvider(
+        api_key="test-secret-key",
+        base_url="https://llm.example.test/v1",
+        model="demo-model",
+    )
+
+    result = provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert result.problem_summary == "E101 temperature alarm."
+    assert len(created_clients) == 1
+    assert created_clients[0].entered is True
+    assert created_clients[0].closed is True
+
+
+def test_openai_compatible_external_client_is_not_closed() -> None:
+    client = FakeContextClient([_chat_response(_draft_json())])
+    provider = OpenAICompatibleProvider(
+        api_key="test-secret-key",
+        base_url="https://llm.example.test/v1",
+        model="demo-model",
+        client=client,  # type: ignore[arg-type]
+    )
+
+    result = provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert result.risk_level == "high"
+    assert client.entered is False
+    assert client.closed is False
+
+
+def test_openai_compatible_retry_reuses_same_internal_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_clients: list[FakeContextClient] = []
+
+    def client_factory() -> FakeContextClient:
+        client = FakeContextClient([httpx.Response(500), _chat_response(_draft_json())])
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(openai_compatible_module.httpx, "Client", client_factory)
+    sleeps: list[float] = []
+    provider = OpenAICompatibleProvider(
+        api_key="test-secret-key",
+        base_url="https://llm.example.test/v1",
+        model="demo-model",
+        max_retries=1,
+        sleep_func=sleeps.append,
+    )
+
+    result = provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert result.problem_summary == "E101 temperature alarm."
+    assert len(created_clients) == 1
+    assert created_clients[0].post_count == 2
+    assert created_clients[0].closed is True
+    assert sleeps == [0.5]
+
+
 def test_factory_creates_openai_compatible_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_api_key", SecretStr("factory-secret"))
@@ -251,6 +324,20 @@ def test_factory_requires_model(monkeypatch: pytest.MonkeyPatch) -> None:
         get_llm_provider()
 
 
+def test_settings_env_file_is_fixed_to_backend_env() -> None:
+    assert Path(Settings.model_config["env_file"]) == CONFIG_BACKEND_DIR / ".env"
+    assert Settings.model_config["env_file_encoding"] == "utf-8"
+
+
+def test_settings_env_file_same_from_project_root_and_backend_cwd() -> None:
+    root_output = _read_env_file_from_cwd(Path(__file__).resolve().parents[1].parent)
+    backend_output = _read_env_file_from_cwd(CONFIG_BACKEND_DIR)
+    expected = str((CONFIG_BACKEND_DIR / ".env").resolve())
+
+    assert root_output == expected
+    assert backend_output == expected
+
+
 def _provider_with_responses(
     responses: list[httpx.Response | Exception],
     max_retries: int = 2,
@@ -286,6 +373,53 @@ def _provider_with_responses(
     )
 
     return provider, calls
+
+
+class FakeContextClient:
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self.responses = list(responses)
+        self.entered = False
+        self.closed = False
+        self.post_count = 0
+
+    def __enter__(self) -> "FakeContextClient":
+        self.entered = True
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.closed = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def post(self, *args: object, **kwargs: object) -> httpx.Response:
+        self.post_count += 1
+        return self.responses.pop(0)
+
+
+def _read_env_file_from_cwd(cwd: Path) -> str:
+    if cwd == CONFIG_BACKEND_DIR:
+        path_setup = "sys.path.insert(0, str(Path('.').resolve()))"
+        python_exe = str((cwd.parent / ".venv" / "Scripts" / "python.exe").resolve())
+    else:
+        path_setup = "sys.path.insert(0, str(Path('backend').resolve()))"
+        python_exe = str((cwd / ".venv" / "Scripts" / "python.exe").resolve())
+
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"{path_setup}\n"
+        "from app.core.config import Settings\n"
+        "print(Path(Settings.model_config['env_file']).resolve())\n"
+    )
+    result = subprocess.run(
+        [python_exe, "-c", script],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 def _messages() -> list[LLMMessage]:

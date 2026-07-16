@@ -67,7 +67,13 @@ class OpenAICompatibleProvider:
         response_model: type[StructuredModel],
     ) -> StructuredModel:
         payload = self._build_payload(messages)
-        response = self._post_with_retries(payload)
+
+        if self._client is not None:
+            response = self._post_with_retries(payload, self._client)
+        else:
+            with httpx.Client() as client:
+                response = self._post_with_retries(payload, client)
+
         content = self._extract_content(response)
         data = self._parse_json_content(content)
 
@@ -91,13 +97,17 @@ class OpenAICompatibleProvider:
 
         return payload
 
-    def _post_with_retries(self, payload: dict) -> httpx.Response:
+    def _post_with_retries(
+        self,
+        payload: dict,
+        client: httpx.Client,
+    ) -> httpx.Response:
         total_attempts = 1 + self.max_retries
         last_error: Exception | None = None
 
         for attempt in range(total_attempts):
             try:
-                response = self._client_or_default().post(
+                response = client.post(
                     f"{self.base_url}/chat/completions",
                     headers={
                         "Authorization": (
@@ -139,13 +149,6 @@ class OpenAICompatibleProvider:
             raise LLMProviderError("LLM provider returned an error.")
 
         raise LLMUnavailableError("LLM service is unavailable.") from last_error
-
-    def _client_or_default(self) -> httpx.Client:
-        if self._client is not None:
-            return self._client
-
-        self._client = httpx.Client()
-        return self._client
 
     def _extract_content(self, response: httpx.Response) -> str:
         try:
