@@ -1,3 +1,19 @@
-from app.schemas.device import DeviceCreate, DeviceResponse
+from app.schemas.device import (
+    AlarmRecordCreate,
+    AlarmRecordResponse,
+    DeviceCreate,
+    DeviceResponse,
+    DeviceStatusResponse,
+    RuntimeDataCreate,
+    RuntimeDataResponse,
+)
 
-__all__ = ["DeviceCreate", "DeviceResponse"]
+__all__ = [
+    "AlarmRecordCreate",
+    "AlarmRecordResponse",
+    "DeviceCreate",
+    "DeviceResponse",
+    "DeviceStatusResponse",
+    "RuntimeDataCreate",
+    "RuntimeDataResponse",
+]

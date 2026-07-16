@@ -7,7 +7,7 @@ from app.api.health import router as health_router
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
-from app.models import Device  # noqa: F401
+from app.models import Device, DeviceAlarmRecord, DeviceRuntimeData  # noqa: F401
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
