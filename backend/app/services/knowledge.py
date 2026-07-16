@@ -6,10 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.models.chunk import KnowledgeChunk
 from app.models.document import KnowledgeDocument
+from app.schemas.knowledge import KnowledgeSearchResult
 from app.services.document_parser import parse_document
-from app.services.embedding import embed_documents
+from app.services.embedding import embed_documents, embed_text
 from app.services.text_splitter import split_text
-from app.services.vector_store import ChromaVectorStore, VectorStoreChunk
+from app.services.vector_store import (
+    ChromaVectorStore,
+    VectorSearchResult,
+    VectorStoreChunk,
+)
 
 
 def create_document_from_file(
@@ -122,8 +127,69 @@ def create_document_from_file(
         raise
 
 
+def search_knowledge(
+    query: str,
+    top_k: int = 5,
+) -> list[KnowledgeSearchResult]:
+    """Search indexed knowledge chunks. Smaller distance means closer meaning."""
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("query must not be empty.")
+
+    if top_k < 1 or top_k > 20:
+        raise ValueError("top_k must be between 1 and 20.")
+
+    query_embedding = embed_text(normalized_query)
+    vector_store = ChromaVectorStore()
+    vector_results = vector_store.search(query_embedding=query_embedding, top_k=top_k)
+    search_results = [
+        _to_knowledge_search_result(result) for result in vector_results
+    ]
+
+    return sorted(search_results, key=lambda result: result.distance)
+
+
 def _build_vector_id(chunk_id: int) -> str:
     return f"knowledge-chunk-{chunk_id}"
+
+
+def _to_knowledge_search_result(
+    vector_result: VectorSearchResult,
+) -> KnowledgeSearchResult:
+    metadata = vector_result.metadata
+
+    return KnowledgeSearchResult(
+        chunk_id=_require_metadata_int(metadata, "chunk_id"),
+        document_id=_require_metadata_int(metadata, "document_id"),
+        filename=_require_metadata_str(metadata, "filename"),
+        chunk_index=_require_metadata_int(metadata, "chunk_index"),
+        content=vector_result.content,
+        source=_require_metadata_str(metadata, "source"),
+        distance=vector_result.distance,
+    )
+
+
+def _require_metadata_int(metadata: dict[str, object], key: str) -> int:
+    if key not in metadata:
+        raise ValueError(f"Chroma metadata missing required field: {key}")
+
+    value = metadata[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Chroma metadata field must be int: {key}")
+
+    return value
+
+
+def _require_metadata_str(metadata: dict[str, object], key: str) -> str:
+    if key not in metadata:
+        raise ValueError(f"Chroma metadata missing required field: {key}")
+
+    value = metadata[key]
+    if not isinstance(value, str):
+        raise TypeError(f"Chroma metadata field must be str: {key}")
+
+    return value
 
 
 def _get_file_type(path: Path) -> str:

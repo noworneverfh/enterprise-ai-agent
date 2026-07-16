@@ -12,6 +12,9 @@ from app.schemas.knowledge import (
     KnowledgeChunkResponse,
     KnowledgeDocumentCreate,
     KnowledgeDocumentResponse,
+    KnowledgeSearchRequest,
+    KnowledgeSearchResponse,
+    KnowledgeSearchResult,
 )
 
 __all__ = [
@@ -24,6 +27,9 @@ __all__ = [
     "KnowledgeChunkResponse",
     "KnowledgeDocumentCreate",
     "KnowledgeDocumentResponse",
+    "KnowledgeSearchRequest",
+    "KnowledgeSearchResponse",
+    "KnowledgeSearchResult",
     "RuntimeDataCreate",
     "RuntimeDataResponse",
 ]

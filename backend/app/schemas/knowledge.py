@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class KnowledgeDocumentCreate(BaseModel):
@@ -56,3 +56,39 @@ class KnowledgeChunkResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class KnowledgeSearchResult(BaseModel):
+    """One knowledge search result returned from vector retrieval."""
+
+    chunk_id: int
+    document_id: int
+    filename: str
+    chunk_index: int
+    content: str
+    source: str
+    distance: float
+
+
+class KnowledgeSearchRequest(BaseModel):
+    """Knowledge search request body."""
+
+    query: str
+    top_k: int = Field(default=5, ge=1, le=20)
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, query: str) -> str:
+        stripped_query = query.strip()
+
+        if not stripped_query:
+            raise ValueError("query must not be empty.")
+
+        return stripped_query
+
+
+class KnowledgeSearchResponse(BaseModel):
+    """Knowledge search response body."""
+
+    query: str
+    results: list[KnowledgeSearchResult]
