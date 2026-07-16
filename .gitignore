@@ -221,3 +221,7 @@ __marimo__/
 *.db
 *.sqlite
 *.sqlite3
+
+# Local vector stores
+chroma_db/
+backend/chroma_db/

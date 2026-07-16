@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = True
     database_url: str = "sqlite:///./enterprise_ai_agent.db"
+    chroma_persist_directory: str = "./chroma_db"
+    chroma_collection_name: str = "knowledge_chunks"
 
     model_config = SettingsConfigDict(
         env_file=".env",

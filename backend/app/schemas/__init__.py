@@ -7,6 +7,12 @@ from app.schemas.device import (
     RuntimeDataCreate,
     RuntimeDataResponse,
 )
+from app.schemas.knowledge import (
+    KnowledgeChunkCreate,
+    KnowledgeChunkResponse,
+    KnowledgeDocumentCreate,
+    KnowledgeDocumentResponse,
+)
 
 __all__ = [
     "AlarmRecordCreate",
@@ -14,6 +20,10 @@ __all__ = [
     "DeviceCreate",
     "DeviceResponse",
     "DeviceStatusResponse",
+    "KnowledgeChunkCreate",
+    "KnowledgeChunkResponse",
+    "KnowledgeDocumentCreate",
+    "KnowledgeDocumentResponse",
     "RuntimeDataCreate",
     "RuntimeDataResponse",
 ]
