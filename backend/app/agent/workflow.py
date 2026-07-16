@@ -2,9 +2,18 @@ import re
 
 from sqlalchemy.orm import Session
 
+from app.agent.prompts import build_diagnosis_messages
 from app.agent.tools import run_get_device_status_tool, run_search_knowledge_tool
+from app.llm.base import (
+    LLMProvider,
+    LLMStructuredOutputError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+)
 from app.schemas.agent import (
+    AgentDiagnoseResponse,
     AgentDiagnoseRequest,
+    AgentDiagnosisDraft,
     AgentToolPlan,
     AgentWorkflowContext,
     DeviceStatusToolInput,
@@ -12,6 +21,7 @@ from app.schemas.agent import (
     KnowledgeSearchToolInput,
     KnowledgeSearchToolResult,
     ParsedAgentQuery,
+    enforce_minimum_risk_level,
 )
 
 
@@ -51,6 +61,15 @@ RISK_ORDER = {
     "high": 3,
     "critical": 4,
 }
+DISCLAIMER = (
+    "\u672c\u8bca\u65ad\u7ed3\u679c\u7531\u8bbe\u5907\u6570\u636e\u548c"
+    "\u77e5\u8bc6\u5e93\u4fe1\u606f\u8f85\u52a9\u751f\u6210\uff0c"
+    "\u4ec5\u4f9b\u6392\u67e5\u53c2\u8003\u3002\u6d89\u53ca"
+    "\u9ad8\u6e29\u3001\u7535\u6c14\u3001\u673a\u68b0\u6216"
+    "\u5b89\u5168\u98ce\u9669\u65f6\uff0c\u8bf7\u505c\u6b62"
+    "\u8bbe\u5907\u5e76\u7531\u4e13\u4e1a\u4eba\u5458\u73b0\u573a\u786e\u8ba4\u3002"
+)
+LLM_UNAVAILABLE_WARNING = "LLM diagnosis unavailable; returned deterministic fallback."
 
 
 def parse_agent_query(request: AgentDiagnoseRequest) -> ParsedAgentQuery:
@@ -171,6 +190,50 @@ def build_agent_context(
     )
 
 
+def run_agent_diagnosis(
+    db: Session,
+    request: AgentDiagnoseRequest,
+    llm_provider: LLMProvider,
+) -> AgentDiagnoseResponse:
+    """Run the fixed workflow and assemble the final diagnosis response."""
+
+    context = build_agent_context(db, request)
+
+    if context.parsed_query.intent == "small_talk_or_unknown":
+        return _assemble_response(
+            context=context,
+            problem_summary=(
+                "The query does not include a device code, alarm code, or fault symptom."
+            ),
+            risk_level="unknown",
+            possible_causes=[],
+            recommended_actions=_no_data_actions(),
+            draft_warnings=["Please provide a device code, alarm code, or fault symptom."],
+        )
+
+    try:
+        draft = llm_provider.complete_structured(
+            build_diagnosis_messages(context),
+            AgentDiagnosisDraft,
+        )
+        risk_level = enforce_minimum_risk_level(
+            draft.risk_level,
+            context.minimum_risk_level,
+        )
+        risk_level = _apply_no_evidence_risk_guard(context, risk_level)
+
+        return _assemble_response(
+            context=context,
+            problem_summary=draft.problem_summary,
+            risk_level=risk_level,
+            possible_causes=draft.possible_causes,
+            recommended_actions=draft.recommended_actions,
+            draft_warnings=draft.warnings,
+        )
+    except (LLMTimeoutError, LLMUnavailableError, LLMStructuredOutputError):
+        return _build_llm_fallback_response(context)
+
+
 def calculate_minimum_risk_level(
     device_result: DeviceStatusToolResult | None,
 ) -> str:
@@ -186,6 +249,137 @@ def calculate_minimum_risk_level(
             highest = level
 
     return highest
+
+
+def _assemble_response(
+    context: AgentWorkflowContext,
+    problem_summary: str,
+    risk_level: str,
+    possible_causes: list[str],
+    recommended_actions: list[str],
+    draft_warnings: list[str] | None = None,
+) -> AgentDiagnoseResponse:
+    device_result = context.device_tool_result
+    has_device_result = device_result is not None and device_result.ok
+
+    return AgentDiagnoseResponse(
+        problem_summary=problem_summary,
+        device=device_result.device if has_device_result else None,
+        device_status=(
+            device_result.latest_runtime_data if has_device_result else None
+        ),
+        recent_alarms=device_result.recent_alarms if has_device_result else [],
+        risk_level=risk_level,
+        possible_causes=possible_causes,
+        recommended_actions=recommended_actions,
+        sources=_dedupe(context.allowed_sources),
+        tools_used=_dedupe(context.tools_succeeded),
+        warnings=_dedupe([*context.warnings, *(draft_warnings or [])]),
+        disclaimer=DISCLAIMER,
+    )
+
+
+def _build_llm_fallback_response(
+    context: AgentWorkflowContext,
+) -> AgentDiagnoseResponse:
+    has_evidence = _has_tool_evidence(context)
+    risk_level = context.minimum_risk_level if has_evidence else "unknown"
+
+    if has_evidence:
+        problem_summary = _fallback_summary(context)
+        recommended_actions = (
+            _high_risk_actions()
+            if risk_level in {"high", "critical"}
+            else _general_fallback_actions()
+        )
+    else:
+        problem_summary = "Unable to complete diagnosis because no usable tool data is available."
+        recommended_actions = _no_data_actions()
+
+    return _assemble_response(
+        context=context,
+        problem_summary=problem_summary,
+        risk_level=risk_level,
+        possible_causes=[],
+        recommended_actions=recommended_actions,
+        draft_warnings=[LLM_UNAVAILABLE_WARNING],
+    )
+
+
+def _fallback_summary(context: AgentWorkflowContext) -> str:
+    parts = [f"Deterministic fallback for query: {context.request.query}"]
+    device_result = context.device_tool_result
+    if device_result is not None and device_result.ok and device_result.device is not None:
+        parts.append(f"Device: {device_result.device.device_code}.")
+    if device_result is not None and device_result.ok and device_result.recent_alarms:
+        alarm_codes = ", ".join(alarm.alarm_code for alarm in device_result.recent_alarms)
+        parts.append(f"Recent alarms: {alarm_codes}.")
+    if context.allowed_sources:
+        parts.append("Knowledge results are available.")
+    return " ".join(parts)
+
+
+def _apply_no_evidence_risk_guard(
+    context: AgentWorkflowContext,
+    risk_level: str,
+) -> str:
+    if not _has_tool_evidence(context):
+        return "unknown"
+    return risk_level
+
+
+def _has_tool_evidence(context: AgentWorkflowContext) -> bool:
+    device_result = context.device_tool_result
+    has_device_evidence = (
+        device_result is not None
+        and device_result.ok
+        and (
+            device_result.device is not None
+            or device_result.latest_runtime_data is not None
+            or bool(device_result.recent_alarms)
+        )
+    )
+    has_knowledge_evidence = (
+        context.knowledge_tool_result is not None
+        and context.knowledge_tool_result.ok
+        and bool(context.knowledge_tool_result.results)
+    )
+    return has_device_evidence or has_knowledge_evidence
+
+
+def _high_risk_actions() -> list[str]:
+    return [
+        "Stop high-load operation.",
+        "Check whether the equipment requires a safe shutdown.",
+        "Inspect cooling, power supply, sensors, and alarm records.",
+        "Contact professional maintenance personnel for on-site confirmation.",
+    ]
+
+
+def _general_fallback_actions() -> list[str]:
+    return [
+        "Review the available equipment status and alarm records.",
+        "Compare the symptom with retrieved knowledge sources.",
+        "Collect updated runtime data before taking major maintenance actions.",
+        "Ask professional maintenance personnel to confirm uncertain findings.",
+    ]
+
+
+def _no_data_actions() -> list[str]:
+    return [
+        "Provide a device code.",
+        "Provide an alarm code.",
+        "Provide the latest runtime data or fault symptom.",
+        "Ask on-site personnel to perform a basic inspection.",
+    ]
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
 
 
 def _extract_device_code(query: str) -> str | None:
