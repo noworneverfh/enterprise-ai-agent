@@ -16,7 +16,8 @@ class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     file_type: Mapped[str] = mapped_column(String(50), nullable=False)
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -39,3 +40,9 @@ class KnowledgeDocument(Base):
         back_populates="document",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def filename(self) -> str:
+        """Display filename kept for API compatibility."""
+
+        return self.original_filename

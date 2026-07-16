@@ -225,3 +225,7 @@ __marimo__/
 # Local vector stores
 chroma_db/
 backend/chroma_db/
+
+# Uploaded knowledge files
+backend/uploads/*
+!backend/uploads/.gitkeep

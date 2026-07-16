@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from app.api.devices import router as devices_router
 from app.api.health import router as health_router
+from app.api.knowledge import router as knowledge_router
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
@@ -36,6 +37,7 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(devices_router)
+app.include_router(knowledge_router)
 
 @app.get("/")
 def root() -> dict[str, str]:

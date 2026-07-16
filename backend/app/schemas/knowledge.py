@@ -6,7 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class KnowledgeDocumentCreate(BaseModel):
     """Data needed to create knowledge document metadata."""
 
-    filename: str = Field(min_length=1, max_length=255)
+    original_filename: str = Field(min_length=1, max_length=255)
+    storage_filename: str = Field(min_length=1, max_length=255)
     file_type: str = Field(min_length=1, max_length=50)
     file_path: str | None = Field(default=None, max_length=500)
     file_size: int | None = Field(default=None, ge=0)
@@ -19,7 +20,6 @@ class KnowledgeDocumentResponse(BaseModel):
     id: int
     filename: str
     file_type: str
-    file_path: str | None
     file_size: int | None
     status: str
     chunk_count: int

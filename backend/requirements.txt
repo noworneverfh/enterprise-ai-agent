@@ -13,6 +13,7 @@ pydantic==2.13.4
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
 python-dotenv==1.2.2
+python-multipart==0.0.20
 httpx==0.28.1
 pytest==8.4.2
 sentence-transformers==5.1.2

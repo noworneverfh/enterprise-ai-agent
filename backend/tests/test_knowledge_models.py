@@ -33,9 +33,10 @@ def test_create_knowledge_document_and_chunk_models() -> None:
     db = SessionLocal()
     try:
         document = KnowledgeDocument(
-            filename="maintenance.md",
+            original_filename="maintenance.md",
+            storage_filename="storage-maintenance.md",
             file_type="markdown",
-            file_path="uploads/maintenance.md",
+            file_path="uploads/storage-maintenance.md",
             file_size=128,
             status="indexed",
             chunk_count=1,
@@ -61,6 +62,10 @@ def test_create_knowledge_document_and_chunk_models() -> None:
         chunk_response = KnowledgeChunkResponse.model_validate(chunk)
 
         assert document_response.filename == "maintenance.md"
+        response_data = document_response.model_dump()
+        assert "original_filename" not in response_data
+        assert "storage_filename" not in response_data
+        assert "file_path" not in response_data
         assert document_response.chunk_count == 1
         assert chunk_response.document_id == document.id
         assert chunk_response.content == "E101 indicates abnormal temperature."

@@ -2,6 +2,7 @@ import hashlib
 from pathlib import Path
 from typing import Callable
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.chunk import KnowledgeChunk
@@ -20,21 +21,24 @@ from app.services.vector_store import (
 def create_document_from_file(
     db: Session,
     file_path: str | Path,
+    original_filename: str | None = None,
     chunk_size: int = 800,
     overlap: int = 100,
     vector_store: ChromaVectorStore | None = None,
-    embedding_func: Callable[[list[str]], list[list[float]]] = embed_documents,
+    embedding_func: Callable[[list[str]], list[list[float]]] | None = None,
 ) -> KnowledgeDocument:
     """Parse, split, embed, index, and persist one knowledge document."""
 
     path = Path(file_path)
+    display_filename = original_filename or path.name
     text = parse_document(path)
     text_chunks = split_text(text, chunk_size=chunk_size, overlap=overlap)
 
     document = KnowledgeDocument(
-        filename=path.name,
+        original_filename=display_filename,
+        storage_filename=path.name,
         file_type=_get_file_type(path),
-        file_path=str(path),
+        file_path=str(path.resolve()),
         file_size=path.stat().st_size,
         status="processing",
         chunk_count=0,
@@ -45,6 +49,9 @@ def create_document_from_file(
 
     if vector_store is None:
         vector_store = ChromaVectorStore()
+
+    if embedding_func is None:
+        embedding_func = embed_documents
 
     candidate_vector_ids: list[str] = []
     chroma_write_attempted = False
@@ -84,9 +91,12 @@ def create_document_from_file(
                     metadata={
                         "document_id": document.id,
                         "chunk_id": chunk_model.id,
-                        "filename": document.filename,
+                        "filename": document.original_filename,
                         "chunk_index": chunk_model.chunk_index,
-                        "source": f"{document.filename}#chunk-{chunk_model.chunk_index}",
+                        "source": (
+                            f"{document.original_filename}"
+                            f"#chunk-{chunk_model.chunk_index}"
+                        ),
                     },
                 )
             )
@@ -125,6 +135,37 @@ def create_document_from_file(
         db.commit()
         db.refresh(failed_document)
         raise
+
+
+def list_documents(db: Session) -> list[KnowledgeDocument]:
+    """Return knowledge documents ordered by newest first."""
+
+    return list(
+        db.scalars(
+            select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc())
+        ).all()
+    )
+
+
+def get_document(db: Session, document_id: int) -> KnowledgeDocument | None:
+    """Return one knowledge document by ID."""
+
+    return db.get(KnowledgeDocument, document_id)
+
+
+def list_document_chunks(
+    db: Session,
+    document: KnowledgeDocument,
+) -> list[KnowledgeChunk]:
+    """Return chunks for one document ordered by chunk index."""
+
+    return list(
+        db.scalars(
+            select(KnowledgeChunk)
+            .where(KnowledgeChunk.document_id == document.id)
+            .order_by(KnowledgeChunk.chunk_index)
+        ).all()
+    )
 
 
 def search_knowledge(
