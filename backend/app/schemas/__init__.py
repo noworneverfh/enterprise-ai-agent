@@ -1,3 +1,13 @@
+from app.schemas.agent import (
+    DeviceStatusToolInput,
+    DeviceStatusToolResult,
+    KnowledgeSearchToolInput,
+    KnowledgeSearchToolResult,
+    ToolAlarmRecord,
+    ToolDeviceInfo,
+    ToolKnowledgeResult,
+    ToolRuntimeData,
+)
 from app.schemas.device import (
     AlarmRecordCreate,
     AlarmRecordResponse,
@@ -22,6 +32,8 @@ __all__ = [
     "AlarmRecordResponse",
     "DeviceCreate",
     "DeviceResponse",
+    "DeviceStatusToolInput",
+    "DeviceStatusToolResult",
     "DeviceStatusResponse",
     "KnowledgeChunkCreate",
     "KnowledgeChunkResponse",
@@ -30,6 +42,12 @@ __all__ = [
     "KnowledgeSearchRequest",
     "KnowledgeSearchResponse",
     "KnowledgeSearchResult",
+    "KnowledgeSearchToolInput",
+    "KnowledgeSearchToolResult",
     "RuntimeDataCreate",
     "RuntimeDataResponse",
+    "ToolAlarmRecord",
+    "ToolDeviceInfo",
+    "ToolKnowledgeResult",
+    "ToolRuntimeData",
 ]
