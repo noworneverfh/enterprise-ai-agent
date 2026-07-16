@@ -1,13 +1,16 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+from app.api.agent import router as agent_router
 from app.api.devices import router as devices_router
 from app.api.health import router as health_router
 from app.api.knowledge import router as knowledge_router
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
+from app.llm.factory import LLMProviderConfigurationError
 from app.models import (  # noqa: F401
     Device,
     DeviceAlarmRecord,
@@ -38,6 +41,19 @@ app = FastAPI(
 app.include_router(health_router)
 app.include_router(devices_router)
 app.include_router(knowledge_router)
+app.include_router(agent_router)
+
+
+@app.exception_handler(LLMProviderConfigurationError)
+async def llm_provider_configuration_exception_handler(
+    request: Request,
+    exc: LLMProviderConfigurationError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "LLM provider is not available."},
+    )
+
 
 @app.get("/")
 def root() -> dict[str, str]:

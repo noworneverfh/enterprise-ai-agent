@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     chroma_collection_name: str = "knowledge_chunks"
     upload_directory: str = str(BACKEND_DIR / "uploads")
     max_upload_size: int = 5 * 1024 * 1024
+    llm_provider: str = "mock"
 
     model_config = SettingsConfigDict(
         env_file=".env",

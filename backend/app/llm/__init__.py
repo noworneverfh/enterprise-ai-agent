@@ -8,6 +8,7 @@ from app.llm.base import (
     LLMTimeoutError,
     LLMUnavailableError,
 )
+from app.llm.factory import LLMProviderConfigurationError, get_llm_provider
 from app.llm.mock import MockLLMProvider
 
 __all__ = [
@@ -17,5 +18,7 @@ __all__ = [
     "LLMStructuredOutputError",
     "LLMTimeoutError",
     "LLMUnavailableError",
+    "LLMProviderConfigurationError",
     "MockLLMProvider",
+    "get_llm_provider",
 ]
