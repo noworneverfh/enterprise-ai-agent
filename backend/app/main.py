@@ -10,7 +10,8 @@ from app.api.knowledge import router as knowledge_router
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
-from app.llm.factory import LLMProviderConfigurationError
+from app.llm.factory import LLMProviderConfigurationError, close_llm_provider
+from app.conversation.models import Conversation, Message  # noqa: F401
 from app.models import (  # noqa: F401
     Device,
     DeviceAlarmRecord,
@@ -24,7 +25,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and clean up application resources."""
 
     Base.metadata.create_all(bind=engine)
-    yield
+    try:
+        yield
+    finally:
+        close_llm_provider()
 
 
 app = FastAPI(

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 1200
     llm_json_mode: bool = True
+    agent_runtime_enabled: bool = False
 
     @field_validator("database_url")
     @classmethod

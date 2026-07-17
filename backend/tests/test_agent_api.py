@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from datetime import datetime
+import json
 import sys
 from pathlib import Path
 
@@ -13,7 +14,9 @@ from sqlalchemy.pool import StaticPool
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
+from app.agent import runtime as runtime_module  # noqa: E402
 from app.agent import workflow  # noqa: E402
+from app.agent.runtime import AgentRuntimeLLMResponse, AgentRuntimeToolCall  # noqa: E402
 from app.conversation import service as conversation_service  # noqa: E402
 from app.conversation.schemas import ConversationCreate, MessageCreate  # noqa: E402
 from app.core.config import settings  # noqa: E402
@@ -76,6 +79,7 @@ def agent_client(monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None,
     def override_get_db() -> Generator[object, None, None]:
         yield object()
 
+    monkeypatch.setattr(settings, "agent_runtime_enabled", False)
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_llm_provider] = lambda: MockLLMProvider(response=_draft())
 
@@ -350,6 +354,127 @@ def test_agent_api_dependency_override_injects_provider(
     assert len(provider.calls) == 1
 
 
+def test_agent_api_runtime_disabled_keeps_legacy_workflow(
+    agent_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "agent_runtime_enabled", False)
+    recorder = _patch_tools(monkeypatch)
+    provider = MockLLMProvider(response=_draft())
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+
+    response = agent_client.post("/agent/diagnose", json={"query": QUERY_DIAGNOSIS})
+
+    assert response.status_code == 200
+    assert response.json()["tools_used"] == ["get_device_status", "search_knowledge"]
+    assert len(provider.calls) == 1
+    assert len(recorder.device_calls) == 1
+    assert len(recorder.knowledge_calls) == 1
+
+
+def test_agent_api_runtime_enabled_calls_tool_and_returns_same_response_shape(
+    agent_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "agent_runtime_enabled", True)
+    provider = FakeRuntimeProvider(
+        [
+            AgentRuntimeLLMResponse(
+                tool_calls=[
+                    AgentRuntimeToolCall(
+                        id="call_1",
+                        name="get_device_status",
+                        arguments={"device_code": "DEV-001"},
+                    )
+                ]
+            ),
+            AgentRuntimeLLMResponse(
+                tool_calls=[
+                    AgentRuntimeToolCall(
+                        id="call_2",
+                        name="search_knowledge",
+                        arguments={"query": "E101报警", "top_k": 3},
+                    )
+                ]
+            ),
+            AgentRuntimeLLMResponse(
+                content=json.dumps(
+                    _draft(
+                        problem_summary="Runtime diagnosis.",
+                        risk_level="low",
+                    )
+                )
+            ),
+        ]
+    )
+    executor = FakeRuntimeExecutor()
+    monkeypatch.setattr(runtime_module, "ToolCallExecutor", lambda db: executor)
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+
+    response = agent_client.post("/agent/diagnose", json={"query": QUERY_DIAGNOSIS})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data) == {
+        "problem_summary",
+        "device",
+        "device_status",
+        "recent_alarms",
+        "risk_level",
+        "possible_causes",
+        "recommended_actions",
+        "sources",
+        "tools_used",
+        "warnings",
+        "disclaimer",
+    }
+    assert data["problem_summary"] == "Runtime diagnosis."
+    assert data["device"]["device_code"] == "DEV-001"
+    assert data["sources"] == ["manual.md#chunk-0"]
+    assert data["tools_used"] == ["get_device_status", "search_knowledge"]
+    assert data["risk_level"] == "high"
+    assert executor.calls == [
+        ("get_device_status", {"device_code": "DEV-001"}),
+        ("search_knowledge", {"query": "E101报警", "top_k": 3}),
+    ]
+
+
+def test_agent_api_runtime_tool_result_is_sent_to_next_llm_round(
+    agent_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "agent_runtime_enabled", True)
+    provider = FakeRuntimeProvider(
+        [
+            AgentRuntimeLLMResponse(
+                tool_calls=[
+                    AgentRuntimeToolCall(
+                        id="call_1",
+                        name="search_knowledge",
+                        arguments={"query": "E101报警"},
+                    )
+                ]
+            ),
+            AgentRuntimeLLMResponse(content=json.dumps(_draft())),
+        ]
+    )
+    executor = FakeRuntimeExecutor()
+    monkeypatch.setattr(runtime_module, "ToolCallExecutor", lambda db: executor)
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+
+    response = agent_client.post("/agent/diagnose", json={"query": QUERY_KNOWLEDGE})
+
+    assert response.status_code == 200
+    second_round_messages = provider.calls[1]["messages"]
+    tool_message = second_round_messages[-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == "call_1"
+    assert tool_message["name"] == "search_knowledge"
+    assert json.loads(tool_message["content"])["result"]["results"][0]["source"] == (
+        "manual.md#chunk-0"
+    )
+
+
 def test_agent_api_without_conversation_id_keeps_single_turn_behavior(
     agent_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -534,6 +659,7 @@ def test_agent_api_conversation_history_guides_second_turn_rag(
 def _build_conversation_test_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[TestClient, sessionmaker, MockLLMProvider]:
+    monkeypatch.setattr(settings, "agent_runtime_enabled", False)
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -660,3 +786,54 @@ def _knowledge_result(
             for index, source in enumerate(sources or ["manual.md#chunk-0"])
         ],
     )
+
+
+class FakeRuntimeProvider:
+    def __init__(self, responses: list[AgentRuntimeLLMResponse]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        tool_choice: str | dict = "auto",
+    ) -> AgentRuntimeLLMResponse:
+        self.calls.append(
+            {
+                "messages": [dict(message) for message in messages],
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        return self.responses.pop(0)
+
+
+class FakeRuntimeExecutor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def execute(self, tool_name: str, arguments: dict) -> dict:
+        self.calls.append((tool_name, arguments))
+        if tool_name == "get_device_status":
+            return {
+                "tool_name": tool_name,
+                "success": True,
+                "result": _device_result(["high"]).model_dump(mode="json"),
+                "error": None,
+            }
+
+        if tool_name == "search_knowledge":
+            return {
+                "tool_name": tool_name,
+                "success": True,
+                "result": _knowledge_result().model_dump(mode="json"),
+                "error": None,
+            }
+
+        return {
+            "tool_name": tool_name,
+            "success": False,
+            "result": {},
+            "error": "tool_not_found",
+        }

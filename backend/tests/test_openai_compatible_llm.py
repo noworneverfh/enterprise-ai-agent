@@ -13,6 +13,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.config import BACKEND_DIR as CONFIG_BACKEND_DIR  # noqa: E402
 from app.core.config import Settings, settings  # noqa: E402
+from app.agent.tool_registry import list_openai_tool_schemas  # noqa: E402
 from app.llm.base import (  # noqa: E402
     LLMMessage,
     LLMProviderError,
@@ -20,7 +21,11 @@ from app.llm.base import (  # noqa: E402
     LLMTimeoutError,
     LLMUnavailableError,
 )
-from app.llm.factory import LLMProviderConfigurationError, get_llm_provider  # noqa: E402
+from app.llm.factory import (  # noqa: E402
+    LLMProviderConfigurationError,
+    close_llm_provider,
+    get_llm_provider,
+)
 from app.llm import openai_compatible as openai_compatible_module  # noqa: E402
 from app.llm.openai_compatible import OpenAICompatibleProvider  # noqa: E402
 from app.schemas.agent import AgentDiagnosisDraft  # noqa: E402
@@ -99,7 +104,37 @@ def test_openai_compatible_network_failure_retries_then_succeeds() -> None:
 
     assert result.risk_level == "high"
     assert len(calls["requests"]) == 2
-    assert calls["sleeps"] == [1]
+    assert calls["sleeps"] == [0.5]
+
+
+def test_openai_compatible_connect_error_retry_exhaustion() -> None:
+    provider, calls = _provider_with_responses(
+        [
+            httpx.ConnectError("network down"),
+            httpx.ConnectError("network down"),
+            httpx.ConnectError("network down"),
+        ],
+        max_retries=2,
+    )
+
+    with pytest.raises(LLMUnavailableError):
+        provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert len(calls["requests"]) == 3
+    assert calls["sleeps"] == [0.5, 1.0]
+
+
+def test_openai_compatible_read_timeout_retries_then_succeeds() -> None:
+    provider, calls = _provider_with_responses(
+        [httpx.ReadTimeout("read timeout"), _chat_response(_draft_json())],
+        max_retries=1,
+    )
+
+    result = provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert result.risk_level == "high"
+    assert len(calls["requests"]) == 2
+    assert calls["sleeps"] == [0.5]
 
 
 def test_openai_compatible_remote_protocol_error_retries_then_succeeds() -> None:
@@ -117,7 +152,7 @@ def test_openai_compatible_remote_protocol_error_retries_then_succeeds() -> None
 
     assert result.risk_level == "high"
     assert len(calls["requests"]) == 2
-    assert calls["sleeps"] == [1]
+    assert calls["sleeps"] == [0.5]
 
 
 def test_openai_compatible_429_retries_then_succeeds() -> None:
@@ -142,7 +177,7 @@ def test_openai_compatible_500_retry_exhaustion() -> None:
         provider.complete_structured(_messages(), AgentDiagnosisDraft)
 
     assert len(calls["requests"]) == 3
-    assert calls["sleeps"] == [1, 2]
+    assert calls["sleeps"] == [0.5, 1.0]
 
 
 def test_openai_compatible_remote_protocol_error_retry_exhaustion() -> None:
@@ -162,7 +197,7 @@ def test_openai_compatible_remote_protocol_error_retry_exhaustion() -> None:
         provider.complete_structured(_messages(), AgentDiagnosisDraft)
 
     assert len(calls["requests"]) == 2
-    assert calls["sleeps"] == [1]
+    assert calls["sleeps"] == [0.5]
 
 
 def test_openai_compatible_401_does_not_retry() -> None:
@@ -189,6 +224,48 @@ def test_openai_compatible_400_does_not_retry() -> None:
 
     assert len(calls["requests"]) == 1
     assert calls["sleeps"] == []
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (400, LLMProviderError),
+        (403, LLMUnavailableError),
+    ],
+)
+def test_openai_compatible_http_error_logs_safe_response_body(
+    caplog: pytest.LogCaptureFixture,
+    status_code: int,
+    expected_error: type[Exception],
+) -> None:
+    secret_key = "sk-secret-should-not-appear"
+    secret_prompt = "secret user prompt should not appear"
+    body = {
+        "error": {
+            "code": "ProviderError",
+            "message": "visible provider error body",
+            "debug": "x" * 600,
+        }
+    }
+    provider, _ = _provider_with_responses(
+        [httpx.Response(status_code, json=body)],
+        api_key=secret_key,
+    )
+
+    caplog.set_level("WARNING")
+    with pytest.raises(expected_error):
+        provider.complete_structured(
+            [LLMMessage(role="user", content=secret_prompt)],
+            AgentDiagnosisDraft,
+        )
+
+    log_text = caplog.text
+    assert "LLM HTTP error response" in log_text
+    assert "mode=structured" in log_text
+    assert f"status_code={status_code}" in log_text
+    assert "visible provider error body" in log_text
+    assert secret_key not in log_text
+    assert secret_prompt not in log_text
 
 
 def test_openai_compatible_max_attempts_are_respected() -> None:
@@ -223,6 +300,112 @@ def test_openai_compatible_json_mode_false_omits_response_format() -> None:
     provider.complete_structured(_messages(), AgentDiagnosisDraft)
 
     assert "response_format" not in calls["json_payloads"][0]
+
+
+def test_openai_compatible_payload_includes_tools() -> None:
+    provider, calls = _provider_with_responses([_chat_response(_draft_json())])
+    tools = list_openai_tool_schemas()
+
+    provider.complete_structured(_messages(), AgentDiagnosisDraft, tools=tools)
+
+    assert calls["json_payloads"][0]["tools"] == tools
+    assert calls["json_payloads"][0]["tools"][0]["function"]["name"] == (
+        "get_device_status"
+    )
+
+
+def test_openai_compatible_complete_with_tools_payload_includes_tools_and_auto_choice() -> None:
+    provider, calls = _provider_with_responses(
+        [_chat_response("Final answer from model.")]
+    )
+    tools = list_openai_tool_schemas()
+
+    result = provider.complete_with_tools(_tool_messages(), tools)
+
+    assert result.content == "Final answer from model."
+    assert result.tool_calls == []
+    payload = calls["json_payloads"][0]
+    assert payload["tools"] == tools
+    assert payload["tool_choice"] == "auto"
+    assert "response_format" not in payload
+
+
+def test_openai_compatible_complete_with_tools_accepts_forced_tool_choice() -> None:
+    provider, calls = _provider_with_responses(
+        [_chat_response("Final answer from model.")]
+    )
+    forced_choice = {
+        "type": "function",
+        "function": {"name": "get_device_status"},
+    }
+
+    provider.complete_with_tools(
+        _tool_messages(),
+        list_openai_tool_schemas(),
+        tool_choice=forced_choice,
+    )
+
+    assert calls["json_payloads"][0]["tool_choice"] == forced_choice
+
+
+def test_openai_compatible_complete_with_tools_parses_tool_calls() -> None:
+    provider, calls = _provider_with_responses(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "get_device_status",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "device_code": "DEV-001",
+                                                    "alarm_limit": 5,
+                                                }
+                                            ),
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        ]
+    )
+
+    result = provider.complete_with_tools(_tool_messages(), list_openai_tool_schemas())
+
+    assert len(calls["requests"]) == 1
+    assert result.content is None
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "call_1"
+    assert result.tool_calls[0].name == "get_device_status"
+    assert result.tool_calls[0].arguments == {
+        "device_code": "DEV-001",
+        "alarm_limit": 5,
+    }
+
+
+def test_openai_compatible_complete_with_tools_retries_then_succeeds() -> None:
+    provider, calls = _provider_with_responses(
+        [httpx.Response(500), _chat_response("Final answer after retry.")],
+        max_retries=1,
+    )
+
+    result = provider.complete_with_tools(_tool_messages(), list_openai_tool_schemas())
+
+    assert result.content == "Final answer after retry."
+    assert result.tool_calls == []
+    assert len(calls["requests"]) == 2
+    assert calls["sleeps"] == [0.5]
 
 
 def test_openai_compatible_sends_authorization_header_and_strips_base_url() -> None:
@@ -359,7 +542,7 @@ def test_openai_compatible_retry_reuses_same_internal_client(
     assert len(created_clients) == 1
     assert created_clients[0].post_count == 2
     assert created_clients[0].closed is False
-    assert sleeps == [1]
+    assert sleeps == [0.5]
 
     provider.close()
 
@@ -393,14 +576,142 @@ def test_openai_compatible_internal_client_uses_stability_settings(
     assert timeout.read == 30
     assert timeout.write == 10.0
     assert timeout.pool == 5.0
-    assert limits.max_connections == 10
+    assert limits.max_connections == 20
     assert limits.max_keepalive_connections == 0
     assert len(created_clients) == 1
 
     provider.close()
 
 
+def test_openai_compatible_parses_tool_calls_json_arguments() -> None:
+    provider, _ = _provider_with_responses([])
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_device_status",
+                                    "arguments": json.dumps(
+                                        {
+                                            "device_code": "DEV-001",
+                                            "alarm_limit": 3,
+                                        }
+                                    ),
+                                },
+                            },
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_knowledge",
+                                    "arguments": '{"query": "E203报警", "top_k": 5}',
+                                },
+                            },
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+
+    calls = provider.parse_tool_calls(response)
+
+    assert calls[0].id == "call_1"
+    assert calls[0].name == "get_device_status"
+    assert calls[0].arguments == {"device_code": "DEV-001", "alarm_limit": 3}
+    assert calls[1].id == "call_2"
+    assert calls[1].name == "search_knowledge"
+    assert calls[1].arguments == {"query": "E203报警", "top_k": 5}
+
+
+def test_openai_compatible_parses_empty_tool_calls() -> None:
+    provider, _ = _provider_with_responses([])
+
+    assert provider.parse_tool_calls(_chat_response(_draft_json())) == []
+
+
+def test_openai_compatible_rejects_invalid_tool_call_arguments() -> None:
+    provider, _ = _provider_with_responses([])
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_knowledge",
+                                    "arguments": "{bad json",
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(LLMStructuredOutputError):
+        provider.parse_tool_calls(response)
+
+
 def test_factory_creates_openai_compatible_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_llm_provider()
+    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    monkeypatch.setattr(settings, "llm_api_key", SecretStr("factory-secret"))
+    monkeypatch.setattr(settings, "llm_base_url", "https://llm.example.test/v1/")
+    monkeypatch.setattr(settings, "llm_model", "demo-model")
+
+    try:
+        provider = get_llm_provider()
+
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.base_url == "https://llm.example.test/v1"
+        assert provider.model == "demo-model"
+    finally:
+        close_llm_provider()
+
+
+def test_factory_reuses_same_provider_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_llm_provider()
+    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    monkeypatch.setattr(settings, "llm_api_key", SecretStr("factory-secret"))
+    monkeypatch.setattr(settings, "llm_base_url", "https://llm.example.test/v1/")
+    monkeypatch.setattr(settings, "llm_model", "demo-model")
+
+    try:
+        first = get_llm_provider()
+        second = get_llm_provider()
+
+        assert first is second
+        assert isinstance(first, OpenAICompatibleProvider)
+        assert first._client is second._client
+    finally:
+        close_llm_provider()
+
+
+def test_factory_close_releases_cached_provider_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    close_llm_provider()
+    created_clients: list[FakeContextClient] = []
+
+    def client_factory(*args: object, **kwargs: object) -> FakeContextClient:
+        client = FakeContextClient([])
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(openai_compatible_module.httpx, "Client", client_factory)
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_api_key", SecretStr("factory-secret"))
     monkeypatch.setattr(settings, "llm_base_url", "https://llm.example.test/v1/")
@@ -409,11 +720,16 @@ def test_factory_creates_openai_compatible_provider(monkeypatch: pytest.MonkeyPa
     provider = get_llm_provider()
 
     assert isinstance(provider, OpenAICompatibleProvider)
-    assert provider.base_url == "https://llm.example.test/v1"
-    assert provider.model == "demo-model"
+    assert len(created_clients) == 1
+    assert created_clients[0].closed is False
+
+    close_llm_provider()
+
+    assert created_clients[0].closed is True
 
 
 def test_factory_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_llm_provider()
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_api_key", None)
     monkeypatch.setattr(settings, "llm_base_url", "https://llm.example.test/v1")
@@ -421,9 +737,11 @@ def test_factory_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(LLMProviderConfigurationError, match="API key"):
         get_llm_provider()
+    close_llm_provider()
 
 
 def test_factory_requires_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_llm_provider()
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_api_key", SecretStr("factory-secret"))
     monkeypatch.setattr(settings, "llm_base_url", "")
@@ -431,9 +749,11 @@ def test_factory_requires_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(LLMProviderConfigurationError, match="base URL"):
         get_llm_provider()
+    close_llm_provider()
 
 
 def test_factory_requires_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_llm_provider()
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_api_key", SecretStr("factory-secret"))
     monkeypatch.setattr(settings, "llm_base_url", "https://llm.example.test/v1")
@@ -441,6 +761,7 @@ def test_factory_requires_model(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(LLMProviderConfigurationError, match="model"):
         get_llm_provider()
+    close_llm_provider()
 
 
 def test_settings_env_file_is_fixed_to_backend_env() -> None:
@@ -545,6 +866,13 @@ def _messages() -> list[LLMMessage]:
     return [
         LLMMessage(role="system", content="Return JSON."),
         LLMMessage(role="user", content="Diagnose E101."),
+    ]
+
+
+def _tool_messages() -> list[dict]:
+    return [
+        {"role": "system", "content": "Use tools when needed."},
+        {"role": "user", "content": "Query DEV-001 status."},
     ]
 
 

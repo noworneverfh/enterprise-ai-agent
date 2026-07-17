@@ -3,7 +3,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.agent.runtime import run_agent_runtime_diagnosis
 from app.agent.workflow import run_agent_diagnosis
+from app.core.config import settings
 from app.db.session import get_db
 from app.llm.base import LLMProvider
 from app.llm.factory import get_llm_provider
@@ -28,6 +30,13 @@ def diagnose(
     llm_provider: LLMProvider = Depends(get_llm_provider),
 ) -> AgentDiagnoseResponse:
     try:
+        if settings.agent_runtime_enabled:
+            return run_agent_runtime_diagnosis(
+                db=db,
+                request=request,
+                llm_provider=llm_provider,
+            )
+
         return run_agent_diagnosis(
             db=db,
             request=request,
