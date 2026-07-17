@@ -5,13 +5,19 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from app.agent import workflow  # noqa: E402
+from app.conversation import service as conversation_service  # noqa: E402
+from app.conversation.schemas import ConversationCreate, MessageCreate  # noqa: E402
 from app.core.config import settings  # noqa: E402
+from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.llm.base import LLMStructuredOutputError, LLMTimeoutError, LLMUnavailableError  # noqa: E402
 from app.llm.factory import get_llm_provider  # noqa: E402
@@ -342,6 +348,216 @@ def test_agent_api_dependency_override_injects_provider(
     assert response.status_code == 200
     assert response.json()["problem_summary"] == "Injected provider."
     assert len(provider.calls) == 1
+
+
+def test_agent_api_without_conversation_id_keeps_single_turn_behavior(
+    agent_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_tools(monkeypatch)
+    provider = MockLLMProvider(response=_draft())
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+
+    response = agent_client.post("/agent/diagnose", json={"query": QUERY_DIAGNOSIS})
+
+    assert response.status_code == 200
+    assert len(provider.calls) == 1
+    assert [message.role for message in provider.calls[0]] == ["system", "user"]
+
+
+def test_agent_api_conversation_first_turn_saves_user_and_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, SessionLocal, provider = _build_conversation_test_client(monkeypatch)
+    db = SessionLocal()
+    try:
+        conversation = conversation_service.create_conversation(
+            db,
+            ConversationCreate(conversation_id="conv-api-001", title="Diagnosis"),
+        )
+    finally:
+        db.close()
+
+    response = client.post(
+        "/agent/diagnose",
+        json={
+            "conversation_id": "conv-api-001",
+            "query": QUERY_DIAGNOSIS,
+            "knowledge_top_k": 5,
+            "include_device_status": True,
+            "include_knowledge": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(provider.calls) == 1
+    assert [message.role for message in provider.calls[0]] == ["system", "user"]
+
+    db = SessionLocal()
+    try:
+        messages = conversation_service.get_recent_messages(
+            db,
+            conversation.conversation_id,
+            limit=10,
+        )
+        assert [message.role for message in messages] == ["user", "assistant"]
+        assert messages[0].content == QUERY_DIAGNOSIS
+        assert "Draft summary." in messages[1].content
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(bind=SessionLocal.kw["bind"])
+
+
+def test_agent_api_conversation_second_turn_reads_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, SessionLocal, provider = _build_conversation_test_client(monkeypatch)
+    db = SessionLocal()
+    try:
+        conversation = conversation_service.create_conversation(
+            db,
+            ConversationCreate(conversation_id="conv-api-002", title="Diagnosis"),
+        )
+        conversation_service.add_message(
+            db,
+            conversation,
+            MessageCreate(role="user", content="上一轮用户问题"),
+        )
+        conversation_service.add_message(
+            db,
+            conversation,
+            MessageCreate(role="assistant", content="上一轮助手回答"),
+        )
+    finally:
+        db.close()
+
+    response = client.post(
+        "/agent/diagnose",
+        json={
+            "conversation_id": "conv-api-002",
+            "query": QUERY_DIAGNOSIS,
+            "knowledge_top_k": 5,
+            "include_device_status": True,
+            "include_knowledge": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(provider.calls) == 1
+    assert [message.role for message in provider.calls[0]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert provider.calls[0][1].content == "上一轮用户问题"
+    assert provider.calls[0][2].content == "上一轮助手回答"
+    assert QUERY_DIAGNOSIS in provider.calls[0][3].content
+
+    db = SessionLocal()
+    try:
+        messages = conversation_service.get_recent_messages(
+            db,
+            conversation.conversation_id,
+            limit=10,
+        )
+        assert [message.role for message in messages] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(bind=SessionLocal.kw["bind"])
+
+
+def test_agent_api_conversation_history_guides_second_turn_rag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, SessionLocal, _provider = _build_conversation_test_client(monkeypatch)
+    search_queries: list[str] = []
+
+    def run_knowledge(input_data: KnowledgeSearchToolInput) -> KnowledgeSearchToolResult:
+        search_queries.append(input_data.query)
+        if "E203" in input_data.query:
+            return _knowledge_result(sources=["e203_controller_manual.md#chunk-0"])
+        return _knowledge_result(sources=["e404_controller_manual.md#chunk-0"])
+
+    monkeypatch.setattr(workflow, "run_search_knowledge_tool", run_knowledge)
+
+    db = SessionLocal()
+    try:
+        conversation = conversation_service.create_conversation(
+            db,
+            ConversationCreate(conversation_id="conv-api-e203", title="E203"),
+        )
+    finally:
+        db.close()
+
+    try:
+        first_response = client.post(
+            "/agent/diagnose",
+            json={
+                "conversation_id": conversation.conversation_id,
+                "query": "DEV-001\u51fa\u73b0E203\u62a5\u8b66\u662f\u4ec0\u4e48\u539f\u56e0\uff1f",
+                "knowledge_top_k": 5,
+                "include_device_status": True,
+                "include_knowledge": True,
+            },
+        )
+        second_response = client.post(
+            "/agent/diagnose",
+            json={
+                "conversation_id": conversation.conversation_id,
+                "query": "\u90a3\u5e94\u8be5\u600e\u4e48\u5904\u7406\uff1f",
+                "knowledge_top_k": 5,
+                "include_device_status": True,
+                "include_knowledge": True,
+            },
+        )
+
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert "E203" in search_queries[-1]
+        assert "\u90a3\u5e94\u8be5\u600e\u4e48\u5904\u7406" in search_queries[-1]
+        assert second_response.json()["sources"] == [
+            "e203_controller_manual.md#chunk-0"
+        ]
+    finally:
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(bind=SessionLocal.kw["bind"])
+
+
+def _build_conversation_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, sessionmaker, MockLLMProvider]:
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SessionLocal = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    Base.metadata.create_all(bind=engine)
+
+    def override_get_db() -> Generator[Session, None, None]:
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    provider = MockLLMProvider(response=_draft())
+    _patch_tools(monkeypatch)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+    return TestClient(app), SessionLocal, provider
 
 
 def _patch_tools(

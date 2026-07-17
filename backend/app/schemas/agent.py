@@ -126,6 +126,7 @@ class AgentDiagnoseRequest(BaseModel):
     """Request accepted by the fixed agent workflow."""
 
     query: str
+    conversation_id: str | None = None
     device_code: str | None = None
     knowledge_top_k: int = Field(default=5, ge=1, le=5)
     include_device_status: bool = True
@@ -140,6 +141,15 @@ class AgentDiagnoseRequest(BaseModel):
             raise ValueError("query must not be empty.")
 
         return normalized
+
+    @field_validator("conversation_id")
+    @classmethod
+    def normalize_conversation_id(cls, conversation_id: str | None) -> str | None:
+        if conversation_id is None:
+            return None
+
+        normalized = conversation_id.strip()
+        return normalized or None
 
     @field_validator("device_code")
     @classmethod

@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.agent.prompts import build_diagnosis_messages
 from app.agent.tools import run_get_device_status_tool, run_search_knowledge_tool
+from app.conversation import service as conversation_service
+from app.conversation.models import Conversation, Message
 from app.llm.base import (
     LLMProvider,
     LLMStructuredOutputError,
@@ -134,6 +136,7 @@ def build_tool_plan(
 def build_agent_context(
     db: Session,
     request: AgentDiagnoseRequest,
+    history_messages: list[Message] | None = None,
 ) -> AgentWorkflowContext:
     """Run deterministic parsing, planning, and at most one call per tool."""
 
@@ -159,7 +162,11 @@ def build_agent_context(
 
     if tool_plan.use_knowledge_tool and tool_plan.knowledge_query is not None:
         tools_attempted.append("search_knowledge")
-        knowledge_query = _build_knowledge_query(tool_plan.knowledge_query, device_result)
+        knowledge_query = _build_knowledge_query(
+            tool_plan.knowledge_query,
+            device_result,
+            history_messages=history_messages,
+        )
         knowledge_result = run_search_knowledge_tool(
             KnowledgeSearchToolInput(
                 query=knowledge_query,
@@ -199,10 +206,13 @@ def run_agent_diagnosis(
 ) -> AgentDiagnoseResponse:
     """Run the fixed workflow and assemble the final diagnosis response."""
 
-    context = build_agent_context(db, request)
+    conversation = _get_request_conversation(db, request)
+    history_messages = _get_request_history(db, request, conversation)
+    context = build_agent_context(db, request, history_messages=history_messages)
+    _save_user_message(db, conversation, request)
 
     if context.parsed_query.intent == "small_talk_or_unknown":
-        return _assemble_response(
+        response = _assemble_response(
             context=context,
             problem_summary=(
                 "The query does not include a device code, alarm code, or fault symptom."
@@ -212,10 +222,12 @@ def run_agent_diagnosis(
             recommended_actions=_no_data_actions(),
             draft_warnings=["Please provide a device code, alarm code, or fault symptom."],
         )
+        _save_assistant_message(db, conversation, response)
+        return response
 
     try:
         draft = llm_provider.complete_structured(
-            build_diagnosis_messages(context),
+            build_diagnosis_messages(context, history_messages=history_messages),
             AgentDiagnosisDraft,
         )
         risk_level = enforce_minimum_risk_level(
@@ -224,7 +236,7 @@ def run_agent_diagnosis(
         )
         risk_level = _apply_no_evidence_risk_guard(context, risk_level)
 
-        return _assemble_response(
+        response = _assemble_response(
             context=context,
             problem_summary=draft.problem_summary,
             risk_level=risk_level,
@@ -232,13 +244,17 @@ def run_agent_diagnosis(
             recommended_actions=draft.recommended_actions,
             draft_warnings=draft.warnings,
         )
+        _save_assistant_message(db, conversation, response)
+        return response
     except (LLMTimeoutError, LLMUnavailableError, LLMStructuredOutputError) as exc:
         logger.exception(
             "LLM diagnosis failed; falling back. exception_type=%s exception_message=%s",
             type(exc).__name__,
             str(exc),
         )
-        return _build_llm_fallback_response(context)
+        response = _build_llm_fallback_response(context)
+        _save_assistant_message(db, conversation, response)
+        return response
 
 
 def calculate_minimum_risk_level(
@@ -393,6 +409,63 @@ def _dedupe(values: list[str]) -> list[str]:
     return deduped
 
 
+def _get_request_conversation(
+    db: Session,
+    request: AgentDiagnoseRequest,
+) -> Conversation | None:
+    if request.conversation_id is None:
+        return None
+
+    return conversation_service.get_conversation(db, request.conversation_id)
+
+
+def _get_request_history(
+    db: Session,
+    request: AgentDiagnoseRequest,
+    conversation: Conversation | None,
+) -> list[Message]:
+    if request.conversation_id is None or conversation is None:
+        return []
+
+    return conversation_service.get_recent_messages(
+        db,
+        request.conversation_id,
+        limit=10,
+    )
+
+
+def _save_user_message(
+    db: Session,
+    conversation: Conversation | None,
+    request: AgentDiagnoseRequest,
+) -> None:
+    if conversation is None:
+        return
+
+    conversation_service.add_message(
+        db,
+        conversation,
+        role="user",
+        content=request.query,
+    )
+
+
+def _save_assistant_message(
+    db: Session,
+    conversation: Conversation | None,
+    response: AgentDiagnoseResponse,
+) -> None:
+    if conversation is None:
+        return
+
+    conversation_service.add_message(
+        db,
+        conversation,
+        role="assistant",
+        content=response.model_dump_json(),
+    )
+
+
 def _extract_device_code(query: str) -> str | None:
     match = DEVICE_CODE_PATTERN.search(query)
     return match.group(0).upper() if match else None
@@ -438,7 +511,9 @@ def _classify_intent(
 def _build_knowledge_query(
     original_query: str,
     device_result: DeviceStatusToolResult | None,
+    history_messages: list[Message] | None = None,
 ) -> str:
+    query = _build_history_augmented_query(original_query, history_messages)
     alarm_codes: list[str] = []
     if device_result is not None and device_result.ok:
         for alarm in device_result.recent_alarms:
@@ -446,6 +521,21 @@ def _build_knowledge_query(
                 alarm_codes.append(alarm.alarm_code)
 
     if not alarm_codes:
+        return query
+
+    return f"{query} {' '.join(alarm_codes)}"
+
+
+def _build_history_augmented_query(
+    original_query: str,
+    history_messages: list[Message] | None,
+) -> str:
+    history_queries = [
+        message.content.strip()
+        for message in history_messages or []
+        if message.role == "user" and message.content.strip()
+    ]
+    if not history_queries:
         return original_query
 
-    return f"{original_query} {' '.join(alarm_codes)}"
+    return " ".join([*history_queries[-3:], original_query])
