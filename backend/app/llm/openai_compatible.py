@@ -46,7 +46,14 @@ class OpenAICompatibleProvider:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.json_mode = json_mode
-        self._client = client
+        self._owns_client = client is None
+        self._client = client or httpx.Client(
+            timeout=self._build_timeout(),
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=0,
+            ),
+        )
         self._sleep = sleep_func
 
     def __repr__(self) -> str:
@@ -67,18 +74,7 @@ class OpenAICompatibleProvider:
         response_model: type[StructuredModel],
     ) -> StructuredModel:
         payload = self._build_payload(messages)
-
-        if self._client is not None:
-            response = self._post_with_retries(payload, self._client)
-        else:
-            with httpx.Client(
-                timeout=self._build_timeout(),
-                limits=httpx.Limits(
-                    max_connections=10,
-                    max_keepalive_connections=0,
-                ),
-            ) as client:
-                response = self._post_with_retries(payload, client)
+        response = self._post_with_retries(payload, self._client)
 
         content = self._extract_content(response)
         data = self._parse_json_content(content)
@@ -102,6 +98,12 @@ class OpenAICompatibleProvider:
             payload["response_format"] = {"type": "json_object"}
 
         return payload
+
+    def close(self) -> None:
+        """Close the owned HTTP client."""
+
+        if self._owns_client:
+            self._client.close()
 
     def _post_with_retries(
         self,

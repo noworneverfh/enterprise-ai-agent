@@ -249,7 +249,7 @@ def test_openai_compatible_repr_and_exceptions_do_not_leak_api_key() -> None:
     assert "very-secret-key" not in str(exc_info.value)
 
 
-def test_openai_compatible_internal_client_is_closed(
+def test_openai_compatible_owned_client_is_closed_by_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created_clients: list[FakeContextClient] = []
@@ -266,11 +266,17 @@ def test_openai_compatible_internal_client_is_closed(
         model="demo-model",
     )
 
+    assert len(created_clients) == 1
+    assert created_clients[0].entered is False
+    assert created_clients[0].closed is False
+
     result = provider.complete_structured(_messages(), AgentDiagnosisDraft)
 
     assert result.problem_summary == "E101 temperature alarm."
-    assert len(created_clients) == 1
-    assert created_clients[0].entered is True
+    assert created_clients[0].closed is False
+
+    provider.close()
+
     assert created_clients[0].closed is True
 
 
@@ -288,6 +294,43 @@ def test_openai_compatible_external_client_is_not_closed() -> None:
     assert result.risk_level == "high"
     assert client.entered is False
     assert client.closed is False
+
+    provider.close()
+
+    assert client.closed is False
+
+
+def test_openai_compatible_reuses_owned_client_across_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_clients: list[FakeContextClient] = []
+
+    def client_factory(*args: object, **kwargs: object) -> FakeContextClient:
+        client = FakeContextClient(
+            [_chat_response(_draft_json()), _chat_response(_draft_json())]
+        )
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(openai_compatible_module.httpx, "Client", client_factory)
+    provider = OpenAICompatibleProvider(
+        api_key="test-secret-key",
+        base_url="https://llm.example.test/v1",
+        model="demo-model",
+    )
+
+    first = provider.complete_structured(_messages(), AgentDiagnosisDraft)
+    second = provider.complete_structured(_messages(), AgentDiagnosisDraft)
+
+    assert first.risk_level == "high"
+    assert second.risk_level == "high"
+    assert len(created_clients) == 1
+    assert created_clients[0].post_count == 2
+    assert created_clients[0].closed is False
+
+    provider.close()
+
+    assert created_clients[0].closed is True
 
 
 def test_openai_compatible_retry_reuses_same_internal_client(
@@ -315,8 +358,12 @@ def test_openai_compatible_retry_reuses_same_internal_client(
     assert result.problem_summary == "E101 temperature alarm."
     assert len(created_clients) == 1
     assert created_clients[0].post_count == 2
-    assert created_clients[0].closed is True
+    assert created_clients[0].closed is False
     assert sleeps == [1]
+
+    provider.close()
+
+    assert created_clients[0].closed is True
 
 
 def test_openai_compatible_internal_client_uses_stability_settings(
@@ -340,8 +387,6 @@ def test_openai_compatible_internal_client_uses_stability_settings(
         timeout_seconds=30,
     )
 
-    provider.complete_structured(_messages(), AgentDiagnosisDraft)
-
     timeout = captured["kwargs"]["timeout"]
     limits = captured["kwargs"]["limits"]
     assert timeout.connect == 10.0
@@ -351,6 +396,8 @@ def test_openai_compatible_internal_client_uses_stability_settings(
     assert limits.max_connections == 10
     assert limits.max_keepalive_connections == 0
     assert len(created_clients) == 1
+
+    provider.close()
 
 
 def test_factory_creates_openai_compatible_provider(monkeypatch: pytest.MonkeyPatch) -> None:
