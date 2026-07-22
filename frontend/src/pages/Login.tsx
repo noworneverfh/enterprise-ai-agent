@@ -40,7 +40,7 @@ export default function LoginPage({
       <section className="grid min-h-[680px] w-full max-w-6xl overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1420] shadow-2xl shadow-black/30 lg:grid-cols-[1fr_430px]">
         <div className="relative overflow-hidden border-b border-white/10 p-8 lg:border-b-0 lg:border-r">
           <div className="absolute inset-x-0 top-0 h-1 bg-sky-500" />
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-300">Enterprise AI Agent Platform</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-300">工业设备智能运维 AI Agent 平台</p>
           <h1 className="mt-5 max-w-2xl text-4xl font-semibold leading-tight text-white">
             工业设备智能诊断与运维控制中心
           </h1>

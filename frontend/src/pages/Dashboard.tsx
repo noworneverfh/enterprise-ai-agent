@@ -127,7 +127,7 @@ export default function DashboardPage({ currentUser }: { currentUser: CurrentUse
     <PageShell>
       <ProductHero
         eyebrow={isUser ? 'Operations Center' : 'Industrial AI'}
-        title={isUser ? '企业设备运行监控中心' : '企业设备智能运维控制台'}
+        title={isUser ? '企业设备运行监控中心' : '工业设备智能运维 AI Agent 平台'}
         description={
           isUser
             ? '面向运维人员展示设备状态、异常报警、AI 辅助诊断报告和现场处置入口，帮助值班人员快速掌握运行风险。'

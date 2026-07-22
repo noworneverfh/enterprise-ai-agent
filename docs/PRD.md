@@ -1,10 +1,10 @@
-# Enterprise AI Agent Platform 产品需求文档
+# 工业设备智能运维 AI Agent 平台 产品需求文档
 
 ## 1. 项目概述
 
 ### 1.1 项目名称
 
-Enterprise AI Agent Platform
+工业设备智能运维 AI Agent 平台
 
 ### 1.2 项目简介
 

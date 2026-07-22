@@ -12,7 +12,7 @@ DEFAULT_DATABASE_URL = f"sqlite:///{DEFAULT_DATABASE_PATH.as_posix()}"
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
 
-    app_name: str = "Enterprise AI Agent Platform"
+    app_name: str = "工业设备智能运维 AI Agent 平台"
     app_version: str = "0.1.0"
     app_env: str = "development"
     debug: bool = True

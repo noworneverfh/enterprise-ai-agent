@@ -1,4 +1,4 @@
-# Enterprise AI Agent Platform Architecture
+# 工业设备智能运维 AI Agent 平台 Architecture
 
 ## System Overview
 
@@ -24,7 +24,7 @@ flowchart LR
 
 ## Product Positioning
 
-Enterprise AI Agent Platform is an industrial equipment intelligent operations platform. It supports the full maintenance loop:
+工业设备智能运维 AI Agent 平台 is an industrial equipment intelligent operations platform. It supports the full maintenance loop:
 
 1. Device status sensing
 2. Risk discovery

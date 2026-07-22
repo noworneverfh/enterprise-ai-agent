@@ -71,7 +71,7 @@ export default function AppLayout({
             </div>
             <div>
               <p className="text-[11px] font-semibold tracking-[0.28em] text-cyan-300">INDUSTRIAL AI</p>
-              <h1 className="mt-1 text-lg font-semibold leading-6">企业设备智能运维平台</h1>
+              <h1 className="mt-1 text-lg font-semibold leading-6">工业设备智能运维 AI Agent 平台</h1>
             </div>
           </div>
           <p className="mt-4 text-xs leading-5 text-slate-400">

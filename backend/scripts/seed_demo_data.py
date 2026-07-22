@@ -1179,7 +1179,7 @@ def _legacy_response_payload(
             else ["list_devices", "get_device_status", "get_device_alarms", "search_knowledge"]
         ),
         "warnings": [],
-        "disclaimer": "本报告由企业设备智能运维平台生成，最终处理需结合现场确认。",
+        "disclaimer": "本报告由工业设备智能运维 AI Agent 平台生成，最终处理需结合现场确认。",
         "report_v2": report_v2,
     }
 
