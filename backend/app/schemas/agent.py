@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domain.diagnosis.models import DiagnosisReportV2, FleetRiskReportV2
+
 
 class DeviceStatusToolInput(BaseModel):
     """Input for the deterministic device status tool."""
@@ -70,6 +72,49 @@ class ToolAlarmRecord(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DeviceAlarmsToolInput(BaseModel):
+    """Input for querying current device alarms."""
+
+    device_code: str | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+    unresolved_only: bool = True
+
+    @field_validator("device_code")
+    @classmethod
+    def normalize_optional_device_code(cls, device_code: str | None) -> str | None:
+        if device_code is None:
+            return None
+
+        normalized = device_code.strip().upper()
+        if not normalized:
+            return None
+
+        if not normalized.startswith("DEV-") or not normalized[4:].isdigit():
+            raise ValueError("device_code must match DEV-<number>.")
+
+        return normalized
+
+
+class ToolDeviceAlarm(BaseModel):
+    """One alarm returned by the alarm overview tool."""
+
+    device_id: str
+    alarm_code: str
+    alarm_name: str
+    level: str
+    status: str
+    created_at: datetime
+
+
+class DeviceAlarmsToolResult(BaseModel):
+    """Result returned by the alarm overview tool."""
+
+    ok: bool
+    error_code: str | None = None
+    alarms: list[ToolDeviceAlarm] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DeviceStatusToolResult(BaseModel):
     """Result returned by the deterministic device status tool."""
 
@@ -109,6 +154,8 @@ class ToolKnowledgeResult(BaseModel):
     content: str
     source: str
     distance: float
+    vector_score: float | None = None
+    rerank_score: float | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -175,13 +222,14 @@ AgentIntent = Literal[
     "small_talk_or_unknown",
 ]
 
-RiskLevel = Literal["low", "medium", "high", "critical", "unknown"]
+RiskLevel = Literal["normal", "low", "medium", "high", "critical", "unknown"]
 RISK_LEVEL_ORDER = {
     "unknown": 0,
-    "low": 1,
-    "medium": 2,
-    "high": 3,
-    "critical": 4,
+    "normal": 1,
+    "low": 2,
+    "medium": 3,
+    "high": 4,
+    "critical": 5,
 }
 
 
@@ -261,6 +309,10 @@ class AgentDiagnoseResponse(BaseModel):
     tools_used: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     disclaimer: str
+    report_v2: DiagnosisReportV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -273,6 +325,81 @@ class AgentDiagnoseResponse(BaseModel):
             raise ValueError("text field must not be empty.")
 
         return normalized
+
+
+class MultiDeviceRiskRequest(BaseModel):
+    """Request for enterprise-wide device risk analysis."""
+
+    query: str = "分析当前所有设备风险"
+    include_knowledge: bool = True
+    knowledge_top_k: int = Field(default=5, ge=1, le=5)
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, query: str) -> str:
+        normalized = query.strip()
+        if not normalized:
+            raise ValueError("query must not be empty.")
+        return normalized
+
+
+class DeviceRiskItem(BaseModel):
+    """Risk summary for one device in the fleet."""
+
+    device: ToolDeviceInfo
+    latest_runtime_data: ToolRuntimeData | None = None
+    unresolved_alarms: list[ToolAlarmRecord] = Field(default_factory=list)
+    risk_level: RiskLevel
+    risk_score: int
+    reasons: list[str] = Field(default_factory=list)
+    knowledge_sources: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+
+
+class MultiDeviceRiskDraft(BaseModel):
+    """LLM-generated draft for a multi-device risk report."""
+
+    summary: str
+    overall_risk_level: RiskLevel
+    key_findings: list[str] = Field(default_factory=list, max_length=10)
+    recommended_actions: list[str] = Field(default_factory=list, max_length=10)
+    warnings: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("summary")
+    @classmethod
+    def normalize_summary(cls, summary: str) -> str:
+        normalized = summary.strip()
+        if not normalized:
+            raise ValueError("summary must not be empty.")
+        return normalized
+
+    @field_validator("key_findings", "recommended_actions", "warnings")
+    @classmethod
+    def remove_empty_items(cls, items: list[str]) -> list[str]:
+        return [item.strip() for item in items if item.strip()]
+
+
+class MultiDeviceRiskResponse(BaseModel):
+    """Final response for enterprise-wide device risk analysis."""
+
+    query: str
+    summary: str
+    overall_risk_level: RiskLevel
+    device_risks: list[DeviceRiskItem]
+    key_findings: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+    tools_used: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    confidence: int
+    disclaimer: str
+    created_at: datetime
+    report_v2: FleetRiskReportV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 def enforce_minimum_risk_level(

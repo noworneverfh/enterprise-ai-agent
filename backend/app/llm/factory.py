@@ -2,6 +2,7 @@ from app.core.config import settings
 from app.llm.base import LLMProvider
 from app.llm.mock import MockLLMProvider
 from app.llm.openai_compatible import OpenAICompatibleProvider
+from app.providers.ollama_provider import OllamaProvider
 
 
 class LLMProviderConfigurationError(Exception):
@@ -47,17 +48,17 @@ def _create_llm_provider() -> LLMProvider:
     if provider_name == "mock":
         return MockLLMProvider(
             response={
-                "problem_summary": "Mock diagnosis draft generated from tool context.",
+                "problem_summary": "系统已根据设备运行数据、报警记录和维修资料生成辅助诊断结果，请结合现场情况确认。",
                 "risk_level": "unknown",
                 "possible_causes": [],
                 "recommended_actions": [
-                    "Please combine equipment data and maintenance documents for on-site inspection."
+                    "建议现场检查设备运行状态，并结合维修手册确认异常原因。"
                 ],
-                "warnings": ["Mock LLM provider is active."],
+                "warnings": ["当前使用本地模拟模型，仅用于开发和测试环境。"],
             }
         )
 
-    if provider_name == "openai_compatible":
+    if provider_name in {"openai", "openai_compatible"}:
         if settings.llm_api_key is None or not settings.llm_api_key.get_secret_value():
             raise LLMProviderConfigurationError("LLM API key is required.")
 
@@ -76,6 +77,17 @@ def _create_llm_provider() -> LLMProvider:
             temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
             json_mode=settings.llm_json_mode,
+        )
+
+    if provider_name == "ollama":
+        if settings.llm_model is None or not settings.llm_model.strip():
+            raise LLMProviderConfigurationError("LLM model is required.")
+
+        return OllamaProvider(
+            base_url=settings.ollama_base_url,
+            model=settings.llm_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            temperature=settings.llm_temperature,
         )
 
     raise LLMProviderConfigurationError(
@@ -99,4 +111,5 @@ def _build_provider_cache_key() -> tuple:
         settings.llm_temperature,
         settings.llm_max_tokens,
         settings.llm_json_mode,
+        settings.ollama_base_url,
     )

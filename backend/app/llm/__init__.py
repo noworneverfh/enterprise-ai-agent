@@ -11,6 +11,7 @@ from app.llm.base import (
 from app.llm.factory import LLMProviderConfigurationError, get_llm_provider
 from app.llm.mock import MockLLMProvider
 from app.llm.openai_compatible import OpenAICompatibleProvider
+from app.providers.ollama_provider import OllamaProvider
 
 __all__ = [
     "LLMMessage",
@@ -21,6 +22,7 @@ __all__ = [
     "LLMUnavailableError",
     "LLMProviderConfigurationError",
     "MockLLMProvider",
+    "OllamaProvider",
     "OpenAICompatibleProvider",
     "get_llm_provider",
 ]

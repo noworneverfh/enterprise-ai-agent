@@ -112,6 +112,50 @@ def test_runtime_alarm_and_status_flow(client: TestClient) -> None:
     assert status_data["recent_alarms"][0]["alarm_code"] == "E101"
 
 
+def test_device_statistics_are_derived_from_latest_runtime_status(client: TestClient) -> None:
+    devices = [
+        ("DEV-N01", "Normal Pump", True, "normal"),
+        ("DEV-N02", "Normal Fan", True, "normal"),
+        ("DEV-W01", "Warning Motor", True, "warning"),
+        ("DEV-M01", "Maintenance Compressor", True, "maintenance"),
+        ("DEV-O01", "Offline Gateway", False, "normal"),
+    ]
+
+    for code, name, is_online, runtime_status in devices:
+        create_response = client.post(
+            "/devices",
+            json={
+                "device_code": code,
+                "name": name,
+                "device_type": "demo",
+                "location": "Test Workshop",
+                "is_online": is_online,
+            },
+        )
+        assert create_response.status_code == 201
+        runtime_response = client.post(
+            f"/devices/{code}/runtime-data",
+            json={
+                "temperature": 35.0,
+                "voltage": 230.0,
+                "current": 4.0,
+                "vibration": 0.1,
+                "status": runtime_status,
+            },
+        )
+        assert runtime_response.status_code == 201
+
+    response = client.get("/devices/statistics")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "total": 5,
+        "normal": 2,
+        "warning": 1,
+        "maintenance": 2,
+    }
+
+
 def test_duplicate_device_code_returns_conflict(client: TestClient) -> None:
     payload = {
         "device_code": "DEV-T03",

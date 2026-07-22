@@ -24,6 +24,7 @@ from app.schemas.agent import (
     KnowledgeSearchToolInput,
     KnowledgeSearchToolResult,
     ParsedAgentQuery,
+    ToolAlarmRecord,
     enforce_minimum_risk_level,
 )
 
@@ -64,6 +65,19 @@ RISK_ORDER = {
     "high": 3,
     "critical": 4,
 }
+QUERY_PARAMETER_KEYWORDS = {
+    "temperature": ["温度", "过热", "升温", "高温"],
+    "vibration": ["振动", "震动"],
+    "current": ["电流"],
+    "voltage": ["电压"],
+    "communication": ["通信", "通讯"],
+}
+ALARM_PARAMETER_HINTS = {
+    "E101": {"temperature"},
+    "E201": {"vibration"},
+    "E203": {"current", "vibration"},
+    "E404": {"communication"},
+}
 DISCLAIMER = (
     "\u672c\u8bca\u65ad\u7ed3\u679c\u7531\u8bbe\u5907\u6570\u636e\u548c"
     "\u77e5\u8bc6\u5e93\u4fe1\u606f\u8f85\u52a9\u751f\u6210\uff0c"
@@ -72,7 +86,7 @@ DISCLAIMER = (
     "\u5b89\u5168\u98ce\u9669\u65f6\uff0c\u8bf7\u505c\u6b62"
     "\u8bbe\u5907\u5e76\u7531\u4e13\u4e1a\u4eba\u5458\u73b0\u573a\u786e\u8ba4\u3002"
 )
-LLM_UNAVAILABLE_WARNING = "LLM diagnosis unavailable; returned deterministic fallback."
+LLM_UNAVAILABLE_WARNING = "智能诊断服务暂时不可用，已根据设备数据和知识库信息生成保守结果。"
 logger = logging.getLogger(__name__)
 
 
@@ -158,7 +172,7 @@ def build_agent_context(
         if device_result.ok:
             tools_succeeded.append("get_device_status")
         else:
-            warnings.append("Device status tool unavailable.")
+            warnings.append("设备状态查询工具暂时不可用。")
 
     if tool_plan.use_knowledge_tool and tool_plan.knowledge_query is not None:
         tools_attempted.append("search_knowledge")
@@ -177,7 +191,7 @@ def build_agent_context(
         if knowledge_result.ok:
             tools_succeeded.append("search_knowledge")
         else:
-            warnings.append("Knowledge search tool unavailable.")
+            warnings.append("知识库检索工具暂时不可用。")
 
     allowed_sources = (
         [result.source for result in knowledge_result.results]
@@ -204,57 +218,12 @@ def run_agent_diagnosis(
     request: AgentDiagnoseRequest,
     llm_provider: LLMProvider,
 ) -> AgentDiagnoseResponse:
-    """Run the fixed workflow and assemble the final diagnosis response."""
+    """Compatibility entry backed by the enterprise DiagnosisOrchestrator."""
 
-    conversation = _get_request_conversation(db, request)
-    history_messages = _get_request_history(db, request, conversation)
-    context = build_agent_context(db, request, history_messages=history_messages)
-    _save_user_message(db, conversation, request)
+    from app.agent.orchestrator import DiagnosisOrchestrator
 
-    if context.parsed_query.intent == "small_talk_or_unknown":
-        response = _assemble_response(
-            context=context,
-            problem_summary=(
-                "The query does not include a device code, alarm code, or fault symptom."
-            ),
-            risk_level="unknown",
-            possible_causes=[],
-            recommended_actions=_no_data_actions(),
-            draft_warnings=["Please provide a device code, alarm code, or fault symptom."],
-        )
-        _save_assistant_message(db, conversation, response)
-        return response
-
-    try:
-        draft = llm_provider.complete_structured(
-            build_diagnosis_messages(context, history_messages=history_messages),
-            AgentDiagnosisDraft,
-        )
-        risk_level = enforce_minimum_risk_level(
-            draft.risk_level,
-            context.minimum_risk_level,
-        )
-        risk_level = _apply_no_evidence_risk_guard(context, risk_level)
-
-        response = _assemble_response(
-            context=context,
-            problem_summary=draft.problem_summary,
-            risk_level=risk_level,
-            possible_causes=draft.possible_causes,
-            recommended_actions=draft.recommended_actions,
-            draft_warnings=draft.warnings,
-        )
-        _save_assistant_message(db, conversation, response)
-        return response
-    except (LLMTimeoutError, LLMUnavailableError, LLMStructuredOutputError) as exc:
-        logger.exception(
-            "LLM diagnosis failed; falling back. exception_type=%s exception_message=%s",
-            type(exc).__name__,
-            str(exc),
-        )
-        response = _build_llm_fallback_response(context)
-        _save_assistant_message(db, conversation, response)
-        return response
+    orchestrator = DiagnosisOrchestrator(db=db, llm_provider=llm_provider)
+    return orchestrator.run_single(request, mode="workflow")
 
 
 def calculate_minimum_risk_level(
@@ -394,10 +363,10 @@ def _general_fallback_actions() -> list[str]:
 
 def _no_data_actions() -> list[str]:
     return [
-        "Provide a device code.",
-        "Provide an alarm code.",
-        "Provide the latest runtime data or fault symptom.",
-        "Ask on-site personnel to perform a basic inspection.",
+        "请提供设备编号。",
+        "请提供报警码。",
+        "请提供最新运行数据或故障现象。",
+        "请现场人员进行基础检查。",
     ]
 
 
@@ -514,16 +483,79 @@ def _build_knowledge_query(
     history_messages: list[Message] | None = None,
 ) -> str:
     query = _build_history_augmented_query(original_query, history_messages)
-    alarm_codes: list[str] = []
+    alarm_terms: list[str] = []
+    device_type: str | None = None
     if device_result is not None and device_result.ok:
+        if device_result.device is not None:
+            device_type = device_result.device.device_type
         for alarm in device_result.recent_alarms:
-            if alarm.alarm_code not in alarm_codes:
-                alarm_codes.append(alarm.alarm_code)
+            alarm_term = _format_alarm_knowledge_term(alarm)
+            if alarm_term not in alarm_terms:
+                alarm_terms.append(alarm_term)
 
-    if not alarm_codes:
+    concerns = _extract_query_parameter_concerns(query)
+    if concerns:
+        alarm_terms = [
+            term for term in alarm_terms if _alarm_term_matches_query_concern(term, concerns)
+        ]
+
+    if not alarm_terms:
         return query
 
-    return f"{query} {' '.join(alarm_codes)}"
+    return _join_knowledge_query_parts(
+        [
+            " ".join(alarm_terms),
+            query,
+            device_type,
+            "maintenance handling steps",
+        ]
+    )
+
+
+def _format_alarm_knowledge_term(alarm: ToolAlarmRecord) -> str:
+    return _join_knowledge_query_parts([alarm.alarm_code, alarm.message])
+
+
+def _extract_query_parameter_concerns(query: str) -> set[str]:
+    return {
+        parameter
+        for parameter, keywords in QUERY_PARAMETER_KEYWORDS.items()
+        if any(keyword in query for keyword in keywords)
+    }
+
+
+def _alarm_term_matches_query_concern(
+    alarm_term: str,
+    concerns: set[str],
+) -> bool:
+    if not concerns:
+        return True
+
+    normalized_term = alarm_term.upper()
+    for alarm_code, parameters in ALARM_PARAMETER_HINTS.items():
+        if alarm_code in normalized_term and parameters & concerns:
+            return True
+
+    return any(
+        keyword in alarm_term
+        for parameter in concerns
+        for keyword in QUERY_PARAMETER_KEYWORDS.get(parameter, [])
+    )
+
+
+def _join_knowledge_query_parts(parts: list[str | None]) -> str:
+    joined_parts: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if not part:
+            continue
+        normalized = " ".join(part.split())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        joined_parts.append(normalized)
+
+    return " ".join(joined_parts)
 
 
 def _build_history_augmented_query(

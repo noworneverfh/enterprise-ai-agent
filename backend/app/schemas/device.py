@@ -87,3 +87,12 @@ class DeviceStatusResponse(BaseModel):
     device: DeviceResponse
     latest_runtime_data: RuntimeDataResponse | None
     recent_alarms: list[AlarmRecordResponse]
+
+
+class DeviceStatisticsResponse(BaseModel):
+    """Aggregated device status statistics for enterprise dashboards."""
+
+    total: int
+    normal: int
+    warning: int
+    maintenance: int

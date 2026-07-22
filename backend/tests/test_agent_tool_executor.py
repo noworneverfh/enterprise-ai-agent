@@ -9,10 +9,13 @@ sys.path.insert(0, str(BACKEND_DIR))
 from app.agent import tool_executor as executor_module  # noqa: E402
 from app.agent.tool_executor import ToolCallExecutor  # noqa: E402
 from app.schemas.agent import (  # noqa: E402
+    DeviceAlarmsToolInput,
+    DeviceAlarmsToolResult,
     DeviceStatusToolInput,
     DeviceStatusToolResult,
     KnowledgeSearchToolInput,
     KnowledgeSearchToolResult,
+    ToolDeviceAlarm,
     ToolDeviceInfo,
     ToolKnowledgeResult,
 )
@@ -50,7 +53,8 @@ def test_executor_runs_get_device_status(monkeypatch) -> None:
     assert calls[0][1].alarm_limit == 3
 
 
-def test_executor_runs_search_knowledge(monkeypatch) -> None:
+def test_executor_runs_search_knowledge(monkeypatch, caplog) -> None:
+    caplog.set_level("INFO")
     calls: list[KnowledgeSearchToolInput] = []
 
     def run_knowledge(input_data: KnowledgeSearchToolInput) -> KnowledgeSearchToolResult:
@@ -75,6 +79,40 @@ def test_executor_runs_search_knowledge(monkeypatch) -> None:
     assert result["result"]["results"][0]["source"] == "e203_manual.md#chunk-0"
     assert calls[0].query == "E203报警"
     assert calls[0].top_k == 2
+    assert "Agent tool call arguments received" in caplog.text
+    assert "tool_name=search_knowledge" in caplog.text
+    assert '"top_k": 2' in caplog.text
+
+
+def test_executor_runs_get_device_alarms(monkeypatch) -> None:
+    calls: list[tuple[object, DeviceAlarmsToolInput]] = []
+    db = object()
+
+    def run_alarms(
+        db_arg: object,
+        input_data: DeviceAlarmsToolInput,
+    ) -> DeviceAlarmsToolResult:
+        calls.append((db_arg, input_data))
+        return _alarms_result()
+
+    monkeypatch.setattr(
+        executor_module.agent_tools,
+        "run_get_device_alarms_tool",
+        run_alarms,
+    )
+
+    result = ToolCallExecutor(db).execute(
+        "get_device_alarms",
+        {"device_code": " dev-001 ", "limit": 3},
+    )
+
+    assert result["tool_name"] == "get_device_alarms"
+    assert result["success"] is True
+    assert result["result"]["ok"] is True
+    assert result["result"]["alarms"][0]["device_id"] == "DEV-001"
+    assert calls[0][0] is db
+    assert calls[0][1].device_code == "DEV-001"
+    assert calls[0][1].limit == 3
 
 
 def test_executor_returns_error_for_unknown_tool() -> None:
@@ -91,7 +129,9 @@ def test_executor_returns_error_for_unknown_tool() -> None:
     }
 
 
-def test_executor_returns_error_for_invalid_arguments() -> None:
+def test_executor_returns_error_for_invalid_arguments(caplog) -> None:
+    caplog.set_level("INFO")
+
     result = ToolCallExecutor(object()).execute(
         "search_knowledge",
         {"query": "E203", "top_k": 99},
@@ -103,6 +143,10 @@ def test_executor_returns_error_for_invalid_arguments() -> None:
         "result": {},
         "error": "invalid_arguments",
     }
+    assert "Knowledge search tool arguments invalid" in caplog.text
+    assert "query=E203" in caplog.text
+    assert "top_k=99" in caplog.text
+    assert "exception_type=ValidationError" in caplog.text
 
 
 def test_executor_returns_error_for_tool_execution_failure(monkeypatch) -> None:
@@ -161,6 +205,23 @@ def _knowledge_result() -> KnowledgeSearchToolResult:
                 content="E203 controller alarm handling.",
                 source="e203_manual.md#chunk-0",
                 distance=0.2,
+            )
+        ],
+        warnings=[],
+    )
+
+
+def _alarms_result() -> DeviceAlarmsToolResult:
+    return DeviceAlarmsToolResult(
+        ok=True,
+        alarms=[
+            ToolDeviceAlarm(
+                device_id="DEV-001",
+                alarm_code="E203",
+                alarm_name="电机运行异常",
+                level="medium",
+                status="unresolved",
+                created_at=datetime.utcnow(),
             )
         ],
         warnings=[],

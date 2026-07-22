@@ -41,7 +41,13 @@ class ChromaVectorStore:
 
         self.persist_directory = str(persist_directory)
         self.collection_name = collection_name
-        self.client = chromadb.PersistentClient(path=self.persist_directory)
+        if settings.chroma_host:
+            self.client = chromadb.HttpClient(
+                host=settings.chroma_host,
+                port=settings.chroma_port,
+            )
+        else:
+            self.client = chromadb.PersistentClient(path=self.persist_directory)
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name
         )

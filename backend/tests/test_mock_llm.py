@@ -17,6 +17,7 @@ from app.llm.base import (  # noqa: E402
     LLMUnavailableError,
 )
 from app.llm.mock import MockLLMProvider  # noqa: E402
+from app.agent.tool_registry import list_openai_tool_schemas  # noqa: E402
 from app.schemas.agent import (  # noqa: E402
     AgentDiagnoseResponse,
     AgentDiagnosisDraft,
@@ -166,6 +167,39 @@ def test_mock_provider_does_not_require_network(
     result = provider.complete_structured(_messages(), AgentDiagnosisDraft)
 
     assert result.problem_summary == "Temperature alarm."
+
+
+def test_mock_provider_complete_with_tools_returns_routed_tool_calls() -> None:
+    provider = MockLLMProvider(response=_draft().model_dump())
+
+    result = provider.complete_with_tools(
+        messages=[
+            {
+                "role": "user",
+                "content": "设备编号: DEV-003\n用户问题: 分析温度异常原因",
+            }
+        ],
+        tools=list_openai_tool_schemas(),
+    )
+
+    assert [tool_call.name for tool_call in result.tool_calls] == [
+        "get_device_status",
+        "get_device_alarms",
+        "search_knowledge",
+    ]
+    assert result.tool_calls[0].arguments["device_code"] == "DEV-003"
+
+
+def test_mock_provider_complete_with_tools_returns_final_json_without_tools() -> None:
+    provider = MockLLMProvider(response=_draft().model_dump())
+
+    result = provider.complete_with_tools(
+        messages=[{"role": "user", "content": "Return final JSON."}],
+        tools=[],
+    )
+
+    assert result.tool_calls == []
+    assert '"problem_summary"' in result.content
 
 
 def _messages() -> list[LLMMessage]:

@@ -4,7 +4,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.schemas.agent import DeviceStatusToolInput, KnowledgeSearchToolInput
+from app.schemas.agent import (
+    DeviceAlarmsToolInput,
+    DeviceStatusToolInput,
+    KnowledgeSearchToolInput,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,15 @@ _TOOL_REGISTRY: dict[str, AgentToolDefinition] = {
             "before answering any question about a specific device's current condition."
         ),
         input_schema=DeviceStatusToolInput,
+    ),
+    "get_device_alarms": AgentToolDefinition(
+        name="get_device_alarms",
+        description=(
+            "Query current or recent real device alarm records from the database. "
+            "Use this tool when the user asks for all exceptions, current alarms, "
+            "or device abnormal events."
+        ),
+        input_schema=DeviceAlarmsToolInput,
     ),
     "search_knowledge": AgentToolDefinition(
         name="search_knowledge",

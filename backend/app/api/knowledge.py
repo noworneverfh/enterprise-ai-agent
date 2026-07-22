@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile, s
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import require_permission
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.chunk import KnowledgeChunk
@@ -17,9 +18,10 @@ from app.schemas.knowledge import (
     KnowledgeSearchResponse,
 )
 from app.services import knowledge as knowledge_service
+from app.services.audit import record_audit_event
 
 
-SUPPORTED_DOCUMENT_EXTENSIONS = {".txt", ".md", ".markdown"}
+SUPPORTED_DOCUMENT_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf"}
 
 router = APIRouter(
     prefix="/knowledge",
@@ -34,6 +36,7 @@ router = APIRouter(
 )
 async def upload_document(
     file: UploadFile = File(...),
+    current_user=Depends(require_permission("knowledge:upload")),
     db: Session = Depends(get_db),
 ) -> KnowledgeDocument:
     saved_path: Path | None = None
@@ -42,11 +45,21 @@ async def upload_document(
         original_filename, suffix = _validate_filename(file.filename)
         content = await _read_and_validate_file(file)
         saved_path = _save_upload_file(content, suffix)
-        return knowledge_service.create_document_from_file(
+        document = knowledge_service.create_document_from_file(
             db,
             saved_path,
             original_filename=original_filename,
         )
+        record_audit_event(
+            db,
+            action="knowledge.upload",
+            resource_type="knowledge_document",
+            resource_id=str(document.id),
+            result="success",
+            user=current_user,
+            detail={"filename": original_filename},
+        )
+        return document
     except HTTPException:
         _delete_saved_file(saved_path)
         raise
@@ -120,6 +133,35 @@ def list_document_chunks(
 ) -> list[KnowledgeChunk]:
     document = _get_document_or_404(db, document_id)
     return knowledge_service.list_document_chunks(db, document)
+
+
+@router.delete(
+    "/documents/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_document(
+    document_id: int,
+    current_user=Depends(require_permission("knowledge:delete")),
+    db: Session = Depends(get_db),
+) -> None:
+    document = _get_document_or_404(db, document_id)
+    try:
+        filename = document.filename
+        knowledge_service.delete_document(db, document)
+        record_audit_event(
+            db,
+            action="knowledge.delete",
+            resource_type="knowledge_document",
+            resource_id=str(document_id),
+            result="success",
+            user=current_user,
+            detail={"filename": filename},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Document deletion failed: {exc}",
+        ) from exc
 
 
 def _validate_filename(filename: str | None) -> tuple[str, str]:

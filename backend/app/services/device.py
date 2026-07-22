@@ -25,6 +25,36 @@ def list_devices(db: Session) -> list[Device]:
     return list(db.scalars(select(Device).order_by(Device.id)).all())
 
 
+def get_device_statistics(db: Session) -> dict[str, int]:
+    """Return dashboard-grade status counts derived from persisted device data.
+
+    The current schema stores the operational state in the latest runtime data
+    rather than on the device record itself. For dashboard purposes we classify
+    each device once, using the latest known runtime status and online flag.
+    """
+
+    stats = {
+        "total": 0,
+        "normal": 0,
+        "warning": 0,
+        "maintenance": 0,
+    }
+
+    for device in list_devices(db):
+        stats["total"] += 1
+        latest_runtime_data = get_latest_runtime_data(db, device)
+        status = (latest_runtime_data.status if latest_runtime_data else "").lower()
+
+        if not device.is_online or status in {"maintenance", "maintaining", "offline"}:
+            stats["maintenance"] += 1
+        elif status in {"warning", "critical", "danger", "error", "abnormal"}:
+            stats["warning"] += 1
+        else:
+            stats["normal"] += 1
+
+    return stats
+
+
 def create_device(db: Session, device_data: DeviceCreate) -> Device:
     """Create one device record."""
 
@@ -112,6 +142,33 @@ def list_alarm_records(
     query: Select[tuple[DeviceAlarmRecord]] = select(DeviceAlarmRecord).where(
         DeviceAlarmRecord.device_id == device.id
     )
+
+    if is_resolved is not None:
+        query = query.where(DeviceAlarmRecord.is_resolved == is_resolved)
+
+    query = query.order_by(
+        DeviceAlarmRecord.occurred_at.desc(),
+        DeviceAlarmRecord.id.desc(),
+    ).limit(limit)
+
+    return list(db.scalars(query).all())
+
+
+def list_recent_alarm_records(
+    db: Session,
+    limit: int = 20,
+    device_code: str | None = None,
+    is_resolved: bool | None = None,
+) -> list[DeviceAlarmRecord]:
+    """Return recent alarm records across devices or for one device."""
+
+    query: Select[tuple[DeviceAlarmRecord]] = select(DeviceAlarmRecord).join(
+        Device,
+        Device.id == DeviceAlarmRecord.device_id,
+    )
+
+    if device_code is not None:
+        query = query.where(Device.device_code == device_code)
 
     if is_resolved is not None:
         query = query.where(DeviceAlarmRecord.is_resolved == is_resolved)

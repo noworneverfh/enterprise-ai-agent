@@ -1,4 +1,4 @@
-from collections.abc import Generator
+﻿from collections.abc import Generator
 from datetime import datetime
 import json
 import sys
@@ -26,6 +26,7 @@ from app.llm.base import LLMStructuredOutputError, LLMTimeoutError, LLMUnavailab
 from app.llm.factory import get_llm_provider  # noqa: E402
 from app.llm.mock import MockLLMProvider  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models.diagnosis import DiagnosisReport, DiagnosisTrace  # noqa: E402
 from app.schemas.agent import (  # noqa: E402
     DeviceStatusToolInput,
     DeviceStatusToolResult,
@@ -218,6 +219,29 @@ def test_agent_api_mock_provider_returns_complete_response(
     }
 
 
+def test_agent_api_report_v2_is_available_by_explicit_version_header(
+    agent_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_tools(monkeypatch)
+    app.dependency_overrides[get_llm_provider] = lambda: MockLLMProvider(
+        response=_draft(problem_summary="Provider summary.", risk_level="critical")
+    )
+
+    response = agent_client.post(
+        "/agent/diagnose",
+        json={"query": QUERY_DIAGNOSIS},
+        headers={"X-Report-Version": "2.0"},
+    )
+
+    assert response.status_code == 200
+    report = response.json()["report_v2"]
+    assert report["report_version"] == "2.0"
+    assert report["generation_mode"] == "mock"
+    assert report["confirmed_facts"]
+    assert report["risk"]["level"] == "critical"
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -389,15 +413,6 @@ def test_agent_api_runtime_enabled_calls_tool_and_returns_same_response_shape(
                 ]
             ),
             AgentRuntimeLLMResponse(
-                tool_calls=[
-                    AgentRuntimeToolCall(
-                        id="call_2",
-                        name="search_knowledge",
-                        arguments={"query": "E101报警", "top_k": 3},
-                    )
-                ]
-            ),
-            AgentRuntimeLLMResponse(
                 content=json.dumps(
                     _draft(
                         problem_summary="Runtime diagnosis.",
@@ -431,12 +446,206 @@ def test_agent_api_runtime_enabled_calls_tool_and_returns_same_response_shape(
     assert data["problem_summary"] == "Runtime diagnosis."
     assert data["device"]["device_code"] == "DEV-001"
     assert data["sources"] == ["manual.md#chunk-0"]
-    assert data["tools_used"] == ["get_device_status", "search_knowledge"]
+    assert data["tools_used"] == ["get_device_status", "get_device_alarms", "search_knowledge"]
     assert data["risk_level"] == "high"
     assert executor.calls == [
         ("get_device_status", {"device_code": "DEV-001"}),
-        ("search_knowledge", {"query": "E101报警", "top_k": 3}),
+        ("get_device_alarms", {"device_code": "DEV-001", "limit": 20, "unresolved_only": True}),
+        (
+            "search_knowledge",
+            {
+                "query": (
+                    "E101 high alarm E101 温度过高 "
+                    f"{QUERY_DIAGNOSIS} pump maintenance handling steps"
+                ),
+                "top_k": 5,
+            },
+        ),
     ]
+
+
+def test_agent_api_runtime_trace_endpoint_keeps_diagnose_shape_unchanged(
+    agent_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "agent_runtime_enabled", True)
+    provider = FakeRuntimeProvider(
+        [
+            AgentRuntimeLLMResponse(
+                tool_calls=[
+                    AgentRuntimeToolCall(
+                        id="call_1",
+                        name="get_device_status",
+                        arguments={"device_code": "DEV-001"},
+                    )
+                ]
+            ),
+            AgentRuntimeLLMResponse(
+                content=json.dumps(
+                    _draft(
+                        problem_summary="Runtime diagnosis.",
+                        risk_level="low",
+                    )
+                )
+            ),
+        ]
+    )
+    executor = FakeRuntimeExecutor()
+    monkeypatch.setattr(runtime_module, "ToolCallExecutor", lambda db: executor)
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+
+    diagnose_response = agent_client.post(
+        "/agent/diagnose",
+        json={"query": QUERY_DIAGNOSIS},
+    )
+    trace_response = agent_client.get("/agent/debug/trace/latest")
+
+    assert diagnose_response.status_code == 200
+    assert "trace" not in diagnose_response.json()
+    assert trace_response.status_code == 200
+    trace = trace_response.json()
+    assert trace["mode"] == "runtime"
+    assert trace["query"] == QUERY_DIAGNOSIS
+    assert trace["router_tools"] == ["get_device_status", "get_device_alarms", "search_knowledge"]
+    assert [result["tool_name"] for result in trace["tool_results"]] == [
+        "get_device_status",
+        "get_device_alarms",
+        "search_knowledge",
+    ]
+    assert trace["rag_results"] == [
+        {
+            "chunk_id": 1,
+            "document_id": 1,
+            "filename": "manual-1.md",
+            "chunk_index": 0,
+            "source": "manual.md#chunk-0",
+            "distance": 0.2,
+            "content": "E101 high temperature maintenance guidance.",
+            "device_code": "DEV-001",
+            "alarm_code": "E101",
+            "query": (
+                "E101 high alarm E101 温度过高 "
+                f"{QUERY_DIAGNOSIS} pump maintenance handling steps"
+            ),
+        }
+    ]
+    assert trace["llm_final_status"]["status"] == "success"
+
+
+def test_agent_api_saves_diagnosis_history_with_full_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, SessionLocal, _provider = _build_conversation_test_client(monkeypatch)
+    monkeypatch.setattr(settings, "agent_runtime_enabled", True)
+    provider = FakeRuntimeProvider(
+        [
+            AgentRuntimeLLMResponse(
+                tool_calls=[
+                    AgentRuntimeToolCall(
+                        id="call_1",
+                        name="get_device_status",
+                        arguments={"device_code": "DEV-001"},
+                    )
+                ]
+            ),
+            AgentRuntimeLLMResponse(
+                content=json.dumps(
+                    _draft(
+                        problem_summary="Saved runtime diagnosis.",
+                        risk_level="medium",
+                    )
+                )
+            ),
+        ]
+    )
+    executor = FakeRuntimeExecutor()
+    monkeypatch.setattr(runtime_module, "ToolCallExecutor", lambda db: executor)
+    app.dependency_overrides[get_llm_provider] = lambda: provider
+
+    try:
+        diagnose_response = client.post(
+            "/agent/diagnose",
+            json={"query": QUERY_DIAGNOSIS},
+        )
+        history_response = client.get("/diagnosis/history")
+
+        assert diagnose_response.status_code == 200
+        assert history_response.status_code == 200
+        history = history_response.json()
+        assert len(history) == 1
+        assert history[0]["device_code"] == "DEV-001"
+        assert history[0]["problem_summary"] == "Saved runtime diagnosis."
+        assert history[0]["confidence"] is not None
+        assert history[0]["sources"] == ["manual.md#chunk-0"]
+        assert history[0]["tools_used"] == [
+            "get_device_status",
+            "get_device_alarms",
+            "search_knowledge",
+        ]
+
+        detail_response = client.get(
+            f"/diagnosis/history/{history[0]['report_id']}"
+        )
+        numeric_detail_response = client.get("/diagnosis/history/1")
+
+        assert detail_response.status_code == 200
+        detail = detail_response.json()
+        assert numeric_detail_response.status_code == 200
+        assert numeric_detail_response.json()["report_id"] == history[0]["report_id"]
+        assert detail["query"] == QUERY_DIAGNOSIS
+        assert detail["response"]["problem_summary"] == "Saved runtime diagnosis."
+        assert detail["response"]["device"]["device_code"] == "DEV-001"
+        assert detail["tools_used"] == [
+            "get_device_status",
+            "get_device_alarms",
+            "search_knowledge",
+        ]
+        assert detail["rag_sources"][0]["source"] == "manual.md#chunk-0"
+        assert detail["rag_sources"][0]["content"] == (
+            "E101 high temperature maintenance guidance."
+        )
+        assert detail["trace"]["llm_final_status"]["status"] == "success"
+
+        db = SessionLocal()
+        try:
+            report_v2 = db.query(DiagnosisReport).one()
+            trace_rows = db.query(DiagnosisTrace).order_by(DiagnosisTrace.id).all()
+            assert report_v2.report_id == history[0]["report_id"]
+            assert report_v2.report_version == "2.0"
+            assert report_v2.provider_type
+            assert report_v2.generation_status == "completed"
+            assert report_v2.report_json["report_version"] == "2.0"
+            assert report_v2.report_json["conclusion"]
+            assert report_v2.report_json["risk"]["level"] == "high"
+            assert [row.step for row in trace_rows] == [
+                "router",
+                "tool",
+                "tool",
+                "tool",
+                "llm",
+            ]
+            assert trace_rows[0].report_id == history[0]["report_id"]
+            assert trace_rows[-1].status == "success"
+        finally:
+            db.close()
+    finally:
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(bind=SessionLocal.kw["bind"])
+
+
+def test_diagnosis_history_detail_not_found_returns_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, SessionLocal, _provider = _build_conversation_test_client(monkeypatch)
+
+    try:
+        response = client.get("/diagnosis/history/missing-report")
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Diagnosis report not found."}
+    finally:
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(bind=SessionLocal.kw["bind"])
 
 
 def test_agent_api_runtime_tool_result_is_sent_to_next_llm_round(
@@ -466,7 +675,11 @@ def test_agent_api_runtime_tool_result_is_sent_to_next_llm_round(
 
     assert response.status_code == 200
     second_round_messages = provider.calls[1]["messages"]
-    tool_message = second_round_messages[-1]
+    tool_message = next(
+        message
+        for message in second_round_messages
+        if message.get("role") == "tool" and message.get("tool_call_id") == "call_1"
+    )
     assert tool_message["role"] == "tool"
     assert tool_message["tool_call_id"] == "call_1"
     assert tool_message["name"] == "search_knowledge"
@@ -828,6 +1041,28 @@ class FakeRuntimeExecutor:
                 "tool_name": tool_name,
                 "success": True,
                 "result": _knowledge_result().model_dump(mode="json"),
+                "error": None,
+            }
+
+        if tool_name == "get_device_alarms":
+            return {
+                "tool_name": tool_name,
+                "success": True,
+                "result": {
+                    "ok": True,
+                    "error_code": None,
+                    "alarms": [
+                        {
+                            "device_id": "DEV-001",
+                            "alarm_code": "E101",
+                            "alarm_name": "温度过高",
+                            "level": "high",
+                            "status": "unresolved",
+                            "created_at": "2026-07-16T15:48:42",
+                        }
+                    ],
+                    "warnings": [],
+                },
                 "error": None,
             }
 

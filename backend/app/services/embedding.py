@@ -1,8 +1,11 @@
 from functools import lru_cache
+import os
+from pathlib import Path
 from typing import Protocol
 
 
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
+EMBEDDING_MODEL_PATH_ENV = "EMBEDDING_MODEL_PATH"
 
 
 class EmbeddingModel(Protocol):
@@ -21,6 +24,17 @@ def get_embedding_model() -> EmbeddingModel:
     """Load the local embedding model lazily."""
 
     from sentence_transformers import SentenceTransformer
+
+    model_path = os.getenv(EMBEDDING_MODEL_PATH_ENV)
+    if model_path:
+        local_path = Path(model_path).expanduser()
+        if not local_path.is_dir():
+            raise RuntimeError(
+                f"{EMBEDDING_MODEL_PATH_ENV} is set but the local embedding "
+                f"model directory does not exist: {local_path}"
+            )
+
+        return SentenceTransformer(str(local_path))
 
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 

@@ -28,6 +28,7 @@ from app.llm.factory import (  # noqa: E402
 )
 from app.llm import openai_compatible as openai_compatible_module  # noqa: E402
 from app.llm.openai_compatible import OpenAICompatibleProvider  # noqa: E402
+from app.providers.ollama_provider import OllamaProvider  # noqa: E402
 from app.schemas.agent import AgentDiagnosisDraft  # noqa: E402
 
 
@@ -678,6 +679,38 @@ def test_factory_creates_openai_compatible_provider(monkeypatch: pytest.MonkeyPa
         assert isinstance(provider, OpenAICompatibleProvider)
         assert provider.base_url == "https://llm.example.test/v1"
         assert provider.model == "demo-model"
+    finally:
+        close_llm_provider()
+
+
+def test_factory_accepts_openai_provider_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_llm_provider()
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_api_key", SecretStr("factory-secret"))
+    monkeypatch.setattr(settings, "llm_base_url", "https://llm.example.test/v1/")
+    monkeypatch.setattr(settings, "llm_model", "demo-model")
+
+    try:
+        provider = get_llm_provider()
+
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.base_url == "https://llm.example.test/v1"
+    finally:
+        close_llm_provider()
+
+
+def test_factory_creates_ollama_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_llm_provider()
+    monkeypatch.setattr(settings, "llm_provider", "ollama")
+    monkeypatch.setattr(settings, "llm_model", "qwen2.5")
+    monkeypatch.setattr(settings, "ollama_base_url", "http://ollama.test")
+
+    try:
+        provider = get_llm_provider()
+
+        assert isinstance(provider, OllamaProvider)
+        assert provider.base_url == "http://ollama.test"
+        assert provider.model == "qwen2.5"
     finally:
         close_llm_provider()
 

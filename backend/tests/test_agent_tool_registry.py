@@ -13,7 +13,11 @@ from app.agent.tool_registry import (  # noqa: E402
     list_openai_tool_schemas,
     list_agent_tools,
 )
-from app.schemas.agent import DeviceStatusToolInput, KnowledgeSearchToolInput  # noqa: E402
+from app.schemas.agent import (  # noqa: E402
+    DeviceAlarmsToolInput,
+    DeviceStatusToolInput,
+    KnowledgeSearchToolInput,
+)
 
 
 def test_registry_discovers_existing_agent_tools() -> None:
@@ -21,9 +25,11 @@ def test_registry_discovers_existing_agent_tools() -> None:
 
     assert [tool.name for tool in tools] == [
         "get_device_status",
+        "get_device_alarms",
         "search_knowledge",
     ]
     assert get_agent_tool("get_device_status").input_schema is DeviceStatusToolInput
+    assert get_agent_tool("get_device_alarms").input_schema is DeviceAlarmsToolInput
     assert get_agent_tool("search_knowledge").input_schema is KnowledgeSearchToolInput
     assert get_agent_tool("missing_tool") is None
 
@@ -44,6 +50,22 @@ def test_device_status_tool_schema_is_correct() -> None:
     assert properties["alarm_limit"]["maximum"] == 20
     assert "MUST be called" in tool.description
     assert "specific device's current condition" in tool.description
+
+
+def test_device_alarms_tool_schema_is_correct() -> None:
+    tool = get_agent_tool("get_device_alarms")
+
+    assert tool is not None
+    schema = tool.input_json_schema()
+    properties = schema["properties"]
+
+    assert tool.description
+    assert schema["title"] == "DeviceAlarmsToolInput"
+    assert properties["device_code"]["anyOf"][0]["type"] == "string"
+    assert properties["limit"]["default"] == 20
+    assert properties["limit"]["minimum"] == 1
+    assert properties["limit"]["maximum"] == 100
+    assert properties["unresolved_only"]["default"] is True
 
 
 def test_knowledge_search_tool_schema_is_correct() -> None:
@@ -79,16 +101,17 @@ def test_list_openai_tool_schemas_returns_registered_tools() -> None:
 
     assert [schema["function"]["name"] for schema in schemas] == [
         "get_device_status",
+        "get_device_alarms",
         "search_knowledge",
     ]
     assert all(schema["type"] == "function" for schema in schemas)
     assert schemas[0]["function"]["parameters"]["required"] == ["device_code"]
-    assert schemas[1]["function"]["parameters"]["required"] == ["query"]
+    assert schemas[2]["function"]["parameters"]["required"] == ["query"]
 
 
 def test_registry_view_is_read_only() -> None:
     registry = get_agent_tool_registry()
 
-    assert set(registry) == {"get_device_status", "search_knowledge"}
+    assert set(registry) == {"get_device_status", "get_device_alarms", "search_knowledge"}
     with pytest.raises(TypeError):
         registry["new_tool"] = get_agent_tool("search_knowledge")

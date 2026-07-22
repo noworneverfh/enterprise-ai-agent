@@ -51,14 +51,148 @@ def test_search_knowledge_sorts_results_by_distance(
         [
             _vector_result("vector-2", "less close", 0.45, _metadata(2, 1)),
             _vector_result("vector-1", "most close", 0.11, _metadata(1, 0)),
-            _vector_result("vector-3", "least close", 0.9, _metadata(3, 2)),
+            _vector_result("vector-3", "third close", 0.5, _metadata(3, 2)),
         ],
     )
 
     results = knowledge_service.search_knowledge("temperature", top_k=3)
 
     assert [result.chunk_id for result in results] == [1, 2, 3]
-    assert [result.distance for result in results] == [0.11, 0.45, 0.9]
+    assert [result.distance for result in results] == [0.11, 0.45, 0.5]
+
+
+def test_search_knowledge_filters_results_by_max_distance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search_dependencies(
+        monkeypatch,
+        [
+            _vector_result(
+                "vector-e203",
+                "E203 controller alarm handling.",
+                0.415,
+                {
+                    **_metadata(203, 0),
+                    "filename": "e203_controller_manual.md",
+                    "source": "e203_controller_manual.md#chunk-0",
+                },
+            ),
+            _vector_result(
+                "vector-e101",
+                "E101 high temperature alarm handling.",
+                0.600,
+                {
+                    **_metadata(101, 0),
+                    "filename": "e101_maintenance_manual.md",
+                    "source": "e101_maintenance_manual.md#chunk-0",
+                },
+            ),
+            _vector_result(
+                "vector-e404",
+                "E404 communication alarm handling.",
+                0.649,
+                {
+                    **_metadata(404, 0),
+                    "filename": "e404_network_manual.md",
+                    "source": "e404_network_manual.md#chunk-0",
+                },
+            ),
+        ],
+    )
+
+    results = knowledge_service.search_knowledge("E203报警", top_k=3)
+
+    assert [result.source for result in results] == [
+        "e203_controller_manual.md#chunk-0"
+    ]
+    assert [result.distance for result in results] == [0.415]
+
+
+def test_search_knowledge_can_return_e201_vibration_manual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search_dependencies(
+        monkeypatch,
+        [
+            _vector_result(
+                "vector-e201",
+                "E201 abnormal vibration maintenance guide.",
+                0.22,
+                {
+                    **_metadata(201, 0),
+                    "filename": "e201_vibration_manual.md",
+                    "source": "e201_vibration_manual.md#chunk-0",
+                },
+            )
+        ],
+    )
+
+    results = knowledge_service.search_knowledge("振动异常", top_k=3)
+
+    assert len(results) == 1
+    assert results[0].source == "e201_vibration_manual.md#chunk-0"
+    assert results[0].distance == 0.22
+
+
+def test_search_knowledge_prefers_exact_alarm_code_over_distance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search_dependencies(
+        monkeypatch,
+        [
+            _vector_result(
+                "vector-e203",
+                "E203 motor abnormal manual.",
+                0.81,
+                {
+                    **_metadata(203, 0),
+                    "filename": "e203_controller_manual.md",
+                    "source": "e203_controller_manual.md#chunk-0",
+                },
+            ),
+            _vector_result(
+                "vector-e201",
+                "E201 vibration abnormal manual.",
+                1.04,
+                {
+                    **_metadata(201, 0),
+                    "filename": "e201_vibration_manual.md",
+                    "source": "e201_vibration_manual.md#chunk-0",
+                },
+            ),
+        ],
+    )
+
+    results = knowledge_service.search_knowledge("E201 振动异常 handling steps", top_k=5)
+
+    assert [result.source for result in results] == [
+        "e201_vibration_manual.md#chunk-0"
+    ]
+    assert [result.distance for result in results] == [1.04]
+
+
+def test_search_knowledge_returns_empty_for_unmatched_hydraulic_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_search_dependencies(
+        monkeypatch,
+        [
+            _vector_result(
+                "vector-hydraulic",
+                "Hydraulic anomaly is unrelated and too far.",
+                0.92,
+                {
+                    **_metadata(500, 0),
+                    "filename": "hydraulic_manual.md",
+                    "source": "hydraulic_manual.md#chunk-0",
+                },
+            )
+        ],
+    )
+
+    results = knowledge_service.search_knowledge("液压异常", top_k=3)
+
+    assert results == []
 
 
 def test_search_knowledge_passes_top_k(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,6 +205,37 @@ def test_search_knowledge_passes_top_k(monkeypatch: pytest.MonkeyPatch) -> None:
     knowledge_service.search_knowledge("temperature", top_k=7)
 
     assert fake_store.received_top_k == 7
+
+
+def test_search_knowledge_expands_candidates_when_reranker_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_store = FakeVectorStore(
+        [
+            _vector_result("vector-1", "first", 0.1, _metadata(1, 0)),
+            _vector_result("vector-2", "second", 0.2, _metadata(2, 1)),
+            _vector_result("vector-3", "third", 0.3, _metadata(3, 2)),
+        ]
+    )
+    monkeypatch.setattr(knowledge_service, "embed_text", lambda query: [1.0, 0.0])
+    monkeypatch.setattr(knowledge_service, "ChromaVectorStore", lambda: fake_store)
+    monkeypatch.setattr(knowledge_service.settings, "reranker_enabled", True)
+    monkeypatch.setattr(knowledge_service.settings, "reranker_candidate_k", 12)
+
+    def fake_rerank(query, results, *, top_n):
+        return [
+            result.model_copy(update={"rerank_score": 1.0 - index})
+            for index, result in enumerate(results)
+        ][:top_n]
+
+    monkeypatch.setattr(knowledge_service, "rerank_knowledge_results", fake_rerank)
+
+    results = knowledge_service.search_knowledge("temperature", top_k=2)
+
+    assert fake_store.received_top_k == 12
+    assert [result.chunk_id for result in results] == [1, 2]
+    assert results[0].vector_score is not None
+    assert results[0].rerank_score == 1.0
 
 
 def test_search_knowledge_returns_empty_list_for_empty_store(

@@ -126,12 +126,32 @@ def test_uploaded_document_has_chunks(knowledge_client: TestClient) -> None:
     assert response.json()["chunk_count"] > 0
 
 
+def test_upload_pdf_document_success(
+    knowledge_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        knowledge_api.knowledge_service,
+        "create_document_from_file",
+        _fake_create_document_from_file,
+    )
+    response = _upload_file(
+        knowledge_client,
+        filename="manual.pdf",
+        content=b"%PDF-1.4 fake pdf content",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["filename"] == "manual.pdf"
+    assert response.json()["file_type"] == "pdf"
+
+
 def test_upload_unsupported_extension_returns_415(
     knowledge_client: TestClient,
 ) -> None:
     response = _upload_file(
         knowledge_client,
-        filename="manual.pdf",
+        filename="manual.docx",
         content=b"content",
     )
 
@@ -251,6 +271,33 @@ def test_list_chunks_ordered_by_chunk_index(knowledge_client: TestClient) -> Non
     assert chunk_indexes == sorted(chunk_indexes)
 
 
+def test_delete_document_removes_document_chunks_vectors_and_file(
+    knowledge_client: TestClient,
+) -> None:
+    upload_response = _upload_file(
+        knowledge_client,
+        filename="manual.txt",
+        content=b"E101 high temperature.",
+    )
+    document_id = upload_response.json()["id"]
+    chunks_response = knowledge_client.get(f"/knowledge/documents/{document_id}/chunks")
+    vector_ids = [chunk["vector_id"] for chunk in chunks_response.json()]
+
+    response = knowledge_client.delete(f"/knowledge/documents/{document_id}")
+
+    assert response.status_code == 204
+    assert knowledge_client.get(f"/knowledge/documents/{document_id}").status_code == 404
+    assert knowledge_client.get(f"/knowledge/documents/{document_id}/chunks").status_code == 404
+    assert [path.name for path in Path(settings.upload_directory).iterdir()] == []
+
+    store = ChromaVectorStore(
+        persist_directory=Path(settings.upload_directory).parent / "chroma",
+        collection_name="test_knowledge_api",
+    )
+    records = store.collection.get(ids=vector_ids)
+    assert records["ids"] == []
+
+
 def test_search_returns_source_and_distance(knowledge_client: TestClient) -> None:
     _upload_file(
         knowledge_client,
@@ -309,7 +356,11 @@ def _fake_create_document_from_file(
     document = KnowledgeDocument(
         original_filename=original_filename or path.name,
         storage_filename=path.name,
-        file_type=path.suffix.lstrip("."),
+        file_type=(
+            "markdown"
+            if path.suffix.lower() in {".md", ".markdown"}
+            else path.suffix.lstrip(".")
+        ),
         file_path=str(path),
         file_size=path.stat().st_size,
         status="indexed",

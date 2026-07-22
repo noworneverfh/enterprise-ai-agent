@@ -104,6 +104,59 @@ def test_diagnosis_query_calls_device_then_knowledge(
     assert len(recorder.device_calls) == 1
     assert len(recorder.knowledge_calls) == 1
     assert "E101" in recorder.knowledge_calls[0].query
+    assert "high alarm" in recorder.knowledge_calls[0].query
+    assert "pump" in recorder.knowledge_calls[0].query
+    assert "maintenance handling steps" in recorder.knowledge_calls[0].query
+
+
+def test_diagnosis_knowledge_query_uses_alarm_context_for_rag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _patch_tools(
+        monkeypatch,
+        device_result=_device_result_with_alarm(
+            device_code="DEV-003",
+            device_type="sensor",
+            alarm_code="E101",
+            alarm_message="温度异常",
+        ),
+    )
+
+    workflow.build_agent_context(
+        object(),
+        AgentDiagnoseRequest(
+            query="分析设备温度异常原因",
+            device_code="DEV-003",
+        ),
+    )
+
+    assert recorder.knowledge_calls[0].query == (
+        "E101 温度异常 分析设备温度异常原因 sensor maintenance handling steps"
+    )
+
+
+def test_diagnosis_knowledge_query_does_not_use_unmatched_alarm_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _patch_tools(
+        monkeypatch,
+        device_result=_device_result_with_alarm(
+            device_code="DEV-003",
+            device_type="sensor",
+            alarm_code="E101",
+            alarm_message="温度异常",
+        ),
+    )
+
+    workflow.build_agent_context(
+        object(),
+        AgentDiagnoseRequest(
+            query="分析设备振动异常原因",
+            device_code="DEV-003",
+        ),
+    )
+
+    assert recorder.knowledge_calls[0].query == "分析设备振动异常原因"
 
 
 def test_fault_symptom_without_device_calls_only_knowledge(
@@ -230,7 +283,7 @@ def test_device_tool_failure_still_continues_to_knowledge(
 
     assert context.tools_attempted == ["get_device_status", "search_knowledge"]
     assert context.tools_succeeded == ["search_knowledge"]
-    assert "Device status tool unavailable." in context.warnings
+    assert "设备状态查询工具暂时不可用。" in context.warnings
     assert len(recorder.knowledge_calls) == 1
 
 
@@ -249,7 +302,7 @@ def test_knowledge_tool_failure_retains_device_result(
     assert context.knowledge_tool_result.ok is False
     assert context.tools_succeeded == ["get_device_status"]
     assert context.allowed_sources == []
-    assert "Knowledge search tool unavailable." in context.warnings
+    assert "知识库检索工具暂时不可用。" in context.warnings
     assert len(recorder.device_calls) == 1
 
 
@@ -355,6 +408,43 @@ def _device_result(levels: list[str] | None = None) -> DeviceStatusToolResult:
                 created_at=now,
             )
             for index, level in enumerate(levels or [])
+        ],
+    )
+
+
+def _device_result_with_alarm(
+    *,
+    device_code: str,
+    device_type: str,
+    alarm_code: str,
+    alarm_message: str,
+) -> DeviceStatusToolResult:
+    now = datetime.utcnow()
+    return DeviceStatusToolResult(
+        ok=True,
+        device_exists=True,
+        device=ToolDeviceInfo(
+            id=3,
+            device_code=device_code,
+            name=f"{device_code} Device",
+            device_type=device_type,
+            location="Workshop C",
+            is_online=True,
+            created_at=now,
+        ),
+        latest_runtime_data=None,
+        recent_alarms=[
+            ToolAlarmRecord(
+                id=101,
+                device_id=3,
+                alarm_code=alarm_code,
+                alarm_level="medium",
+                message=alarm_message,
+                is_resolved=False,
+                occurred_at=now,
+                resolved_at=None,
+                created_at=now,
+            )
         ],
     )
 

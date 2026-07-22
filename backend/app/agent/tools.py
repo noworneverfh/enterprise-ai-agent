@@ -3,11 +3,14 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.schemas.agent import (
+    DeviceAlarmsToolInput,
+    DeviceAlarmsToolResult,
     DeviceStatusToolInput,
     DeviceStatusToolResult,
     KnowledgeSearchToolInput,
     KnowledgeSearchToolResult,
     ToolAlarmRecord,
+    ToolDeviceAlarm,
     ToolDeviceInfo,
     ToolKnowledgeResult,
     ToolRuntimeData,
@@ -17,6 +20,13 @@ from app.services import knowledge as knowledge_service
 
 
 logger = logging.getLogger(__name__)
+
+ALARM_NAMES = {
+    "E101": "温度过高",
+    "E201": "振动异常",
+    "E203": "电机运行异常",
+    "E404": "通信异常",
+}
 
 
 def run_get_device_status_tool(
@@ -88,6 +98,11 @@ def run_search_knowledge_tool(
     """Search knowledge chunks using the existing knowledge service."""
 
     try:
+        logger.info(
+            "Knowledge search tool invoked. query=%s top_k=%s",
+            input_data.query,
+            input_data.top_k,
+        )
         results = knowledge_service.search_knowledge(
             query=input_data.query,
             top_k=input_data.top_k,
@@ -105,11 +120,68 @@ def run_search_knowledge_tool(
             ],
             warnings=warnings,
         )
-    except Exception:
-        logger.exception("Knowledge search tool failed.")
+    except Exception as exc:
+        logger.exception(
+            "Knowledge search tool failed. query=%s top_k=%s exception_type=%s error=%s",
+            input_data.query,
+            input_data.top_k,
+            type(exc).__name__,
+            exc,
+        )
         return KnowledgeSearchToolResult(
             ok=False,
             error_code="knowledge_search_failed",
             results=[],
             warnings=["Knowledge search failed."],
         )
+
+
+def run_get_device_alarms_tool(
+    db: Session,
+    input_data: DeviceAlarmsToolInput,
+) -> DeviceAlarmsToolResult:
+    """Return real alarm records from the device alarm table."""
+
+    try:
+        alarms = device_service.list_recent_alarm_records(
+            db,
+            limit=input_data.limit,
+            device_code=input_data.device_code,
+            is_resolved=False if input_data.unresolved_only else None,
+        )
+        warnings: list[str] = []
+        if not alarms:
+            warnings.append("No alarms found.")
+
+        return DeviceAlarmsToolResult(
+            ok=True,
+            error_code=None,
+            alarms=[
+                ToolDeviceAlarm(
+                    device_id=alarm.device.device_code,
+                    alarm_code=alarm.alarm_code,
+                    alarm_name=_alarm_display_name(alarm.alarm_code, alarm.message),
+                    level=alarm.alarm_level,
+                    status="resolved" if alarm.is_resolved else "unresolved",
+                    created_at=alarm.occurred_at,
+                )
+                for alarm in alarms
+            ],
+            warnings=warnings,
+        )
+    except Exception:
+        logger.exception("Device alarms tool failed.")
+        return DeviceAlarmsToolResult(
+            ok=False,
+            error_code="alarm_query_failed",
+            alarms=[],
+            warnings=["Device alarm query failed."],
+        )
+
+
+def _alarm_display_name(alarm_code: str, message: str) -> str:
+    normalized_message = message.lower()
+    if "mock" not in normalized_message and "milestone" not in normalized_message:
+        return message
+
+    return ALARM_NAMES.get(alarm_code.upper(), "设备异常")

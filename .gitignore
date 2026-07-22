@@ -209,6 +209,10 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
@@ -221,11 +225,18 @@ __marimo__/
 *.db
 *.sqlite
 *.sqlite3
+backend/data/
 
 # Local vector stores
 chroma_db/
 backend/chroma_db/
 
+# Local embedding models
+models/
+
 # Uploaded knowledge files
 backend/uploads/*
 !backend/uploads/.gitkeep
+
+# Runtime logs
+backend/logs/

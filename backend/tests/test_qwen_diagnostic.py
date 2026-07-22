@@ -1,4 +1,5 @@
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,8 @@ from app.schemas.agent import (  # noqa: E402
     ToolRuntimeData,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class DiagnosticOpenAICompatibleProvider(OpenAICompatibleProvider):
     def complete_structured(
@@ -46,35 +49,32 @@ class DiagnosticOpenAICompatibleProvider(OpenAICompatibleProvider):
                 response = self._post_with_retries(payload, client)
 
         content = self._extract_content(response)
-        print("\n=== QWEN_RAW_CONTENT_BEGIN ===")
-        print(content)
-        print("=== QWEN_RAW_CONTENT_END ===")
+        logger.info("Qwen raw content: %s", content)
 
         stripped = content.strip()
         match = MARKDOWN_JSON_PATTERN.match(stripped)
         if match is not None:
             stripped = match.group(1).strip()
 
-        print("\n=== QWEN_STRIPPED_BEFORE_JSON_LOADS_BEGIN ===")
-        print(stripped)
-        print("=== QWEN_STRIPPED_BEFORE_JSON_LOADS_END ===")
+        logger.info("Qwen stripped content before json.loads: %s", stripped)
 
         try:
             data = json.loads(stripped)
         except json.JSONDecodeError as exc:
-            print(f"\n=== QWEN_JSON_LOADS_ERROR === {type(exc).__name__}: {exc}")
+            logger.info("Qwen json.loads error: %s: %s", type(exc).__name__, exc)
             raise LLMStructuredOutputError(
                 "LLM response content is not valid JSON."
             ) from exc
 
-        print("\n=== QWEN_DATA_BEFORE_MODEL_VALIDATE_BEGIN ===")
-        print(json.dumps(data, ensure_ascii=False, indent=2))
-        print("=== QWEN_DATA_BEFORE_MODEL_VALIDATE_END ===")
+        logger.info(
+            "Qwen data before model validation: %s",
+            json.dumps(data, ensure_ascii=False, indent=2),
+        )
 
         try:
             return response_model.model_validate(data)
         except ValidationError as exc:
-            print(f"\n=== QWEN_MODEL_VALIDATE_ERROR === {type(exc).__name__}: {exc}")
+            logger.info("Qwen model validation error: %s: %s", type(exc).__name__, exc)
             raise LLMStructuredOutputError(
                 "LLM output failed schema validation."
             ) from exc
@@ -115,9 +115,10 @@ def test_qwen_diagnostic_agent_diagnose(monkeypatch):
     finally:
         app.dependency_overrides.clear()
 
-    print("\n=== AGENT_RESPONSE_BEGIN ===")
-    print(json.dumps(response.json(), ensure_ascii=False, indent=2))
-    print("=== AGENT_RESPONSE_END ===")
+    logger.info(
+        "Agent diagnostic response: %s",
+        json.dumps(response.json(), ensure_ascii=False, indent=2),
+    )
 
     assert response.status_code == 200
 

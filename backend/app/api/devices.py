@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import require_permission
 from app.db.session import get_db
 from app.models.alarm import DeviceAlarmRecord
 from app.models.device import Device
@@ -10,6 +11,7 @@ from app.schemas.device import (
     AlarmRecordResponse,
     DeviceCreate,
     DeviceResponse,
+    DeviceStatisticsResponse,
     DeviceStatusResponse,
     RuntimeDataCreate,
     RuntimeDataResponse,
@@ -30,6 +32,7 @@ router = APIRouter(
 )
 def create_device(
     device_data: DeviceCreate,
+    _current_user=Depends(require_permission("devices:write")),
     db: Session = Depends(get_db),
 ) -> Device:
     existing_device = device_service.get_device_by_code(db, device_data.device_code)
@@ -48,9 +51,21 @@ def create_device(
     response_model=list[DeviceResponse],
 )
 def list_devices(
+    _current_user=Depends(require_permission("devices:view")),
     db: Session = Depends(get_db),
 ) -> list[Device]:
     return device_service.list_devices(db)
+
+
+@router.get(
+    "/statistics",
+    response_model=DeviceStatisticsResponse,
+)
+def get_device_statistics(
+    _current_user=Depends(require_permission("devices:view")),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    return device_service.get_device_statistics(db)
 
 
 @router.get(
@@ -59,6 +74,7 @@ def list_devices(
 )
 def get_device(
     device_code: str,
+    _current_user=Depends(require_permission("devices:view")),
     db: Session = Depends(get_db),
 ) -> Device:
     device = _get_device_or_404(db, device_code)
@@ -73,6 +89,7 @@ def get_device(
 def create_runtime_data(
     device_code: str,
     runtime_data: RuntimeDataCreate,
+    _current_user=Depends(require_permission("devices:write")),
     db: Session = Depends(get_db),
 ) -> DeviceRuntimeData:
     device = _get_device_or_404(db, device_code)
@@ -86,6 +103,7 @@ def create_runtime_data(
 def list_runtime_data(
     device_code: str,
     limit: int = Query(default=20, ge=1, le=200),
+    _current_user=Depends(require_permission("devices:view")),
     db: Session = Depends(get_db),
 ) -> list[DeviceRuntimeData]:
     device = _get_device_or_404(db, device_code)
@@ -99,6 +117,7 @@ def list_runtime_data(
 def get_device_status(
     device_code: str,
     alarm_limit: int = Query(default=5, ge=1, le=50),
+    _current_user=Depends(require_permission("devices:view")),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     device = _get_device_or_404(db, device_code)
@@ -125,6 +144,7 @@ def get_device_status(
 def create_alarm_record(
     device_code: str,
     alarm_data: AlarmRecordCreate,
+    _current_user=Depends(require_permission("devices:write")),
     db: Session = Depends(get_db),
 ) -> DeviceAlarmRecord:
     device = _get_device_or_404(db, device_code)
@@ -139,6 +159,7 @@ def list_alarm_records(
     device_code: str,
     limit: int = Query(default=20, ge=1, le=200),
     is_resolved: bool | None = None,
+    _current_user=Depends(require_permission("devices:view")),
     db: Session = Depends(get_db),
 ) -> list[DeviceAlarmRecord]:
     device = _get_device_or_404(db, device_code)

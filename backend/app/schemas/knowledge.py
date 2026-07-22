@@ -53,9 +53,20 @@ class KnowledgeChunkResponse(BaseModel):
     vector_id: str | None
     start_char: int | None
     end_char: int | None
+    section: str | None = None
+    page: int | None = None
+    chunk_metadata: dict | None = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class KnowledgeCitation(BaseModel):
+    """Business citation metadata attached to one knowledge hit."""
+
+    document: str
+    section: str | None = None
+    summary: str | None = None
 
 
 class KnowledgeSearchResult(BaseModel):
@@ -68,6 +79,72 @@ class KnowledgeSearchResult(BaseModel):
     content: str
     source: str
     distance: float
+    vector_score: float | None = None
+    rerank_score: float | None = None
+    citation: KnowledgeCitation | None = None
+    fault_code: str | None = None
+    device_type: str | None = None
+    section: str | None = None
+
+
+class FaultCauseResponse(BaseModel):
+    id: int
+    cause: str
+    priority: int
+    evidence: str | None = None
+    verification_method: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InspectionStepResponse(BaseModel):
+    id: int
+    order: int
+    operation: str
+    expected_result: str | None = None
+    safety_requirement: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MaintenanceActionResponse(BaseModel):
+    id: int
+    priority: int
+    action: str
+    condition: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MaintenanceCaseResponse(BaseModel):
+    id: int
+    device: str
+    fault: str
+    symptom: str
+    root_cause: str
+    solution: str
+    result: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FaultKnowledgeEntryResponse(BaseModel):
+    id: int
+    document_id: int | None = None
+    fault_code: str
+    fault_name: str
+    description: str
+    severity: str
+    device_type: str | None = None
+    model: str | None = None
+    trigger_conditions: dict | list | None = None
+    causes: list[FaultCauseResponse] = []
+    inspection_steps: list[InspectionStepResponse] = []
+    maintenance_actions: list[MaintenanceActionResponse] = []
+    cases: list[MaintenanceCaseResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class KnowledgeSearchRequest(BaseModel):

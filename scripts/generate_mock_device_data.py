@@ -14,7 +14,7 @@ from app.models import Device, DeviceAlarmRecord, DeviceRuntimeData  # noqa: E40
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate mock device data.")
+    parser = argparse.ArgumentParser(description="Generate local device seed data.")
     parser.add_argument("--device-code", default="DEV-001")
     parser.add_argument("--name", default="Demo Device")
     parser.add_argument("--device-type", default="pump")
@@ -63,16 +63,23 @@ def main() -> None:
                 )
             )
 
-        alarm_codes = ["E101", "E203", "W301", "E404"]
+        alarm_names = {
+            "E101": "温度过高",
+            "E203": "电机运行异常",
+            "W301": "设备运行预警",
+            "E404": "通信异常",
+        }
+        alarm_codes = list(alarm_names)
         alarm_levels = ["low", "medium", "high"]
         for index in range(args.alarm_count):
             occurred_at = now - timedelta(minutes=(index + 1) * 7)
+            alarm_code = random.choice(alarm_codes)
             db.add(
                 DeviceAlarmRecord(
                     device_id=device.id,
-                    alarm_code=random.choice(alarm_codes),
+                    alarm_code=alarm_code,
                     alarm_level=random.choice(alarm_levels),
-                    message="Mock alarm generated for milestone 2 demo.",
+                    message=alarm_names[alarm_code],
                     is_resolved=False,
                     occurred_at=occurred_at,
                 )

@@ -1,4 +1,5 @@
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,29 @@ def test_parse_markdown_document(tmp_path: Path) -> None:
 
     assert "# E101" in text
     assert "Check the cooling fan." in text
+
+
+def test_parse_pdf_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    file_path = tmp_path / "manual.pdf"
+    file_path.write_bytes(b"%PDF-1.4")
+
+    class FakePage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class FakePdfReader:
+        def __init__(self, path: str) -> None:
+            self.pages = [FakePage("E203 controller alarm."), FakePage("Check wiring.")]
+
+    fake_pypdf = types.SimpleNamespace(PdfReader=FakePdfReader)
+    monkeypatch.setitem(sys.modules, "pypdf", fake_pypdf)
+
+    text = parse_document(file_path)
+
+    assert text == "E203 controller alarm.\n\nCheck wiring."
 
 
 def test_split_text_with_overlap() -> None:

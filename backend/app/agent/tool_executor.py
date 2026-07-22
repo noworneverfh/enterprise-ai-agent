@@ -30,10 +30,29 @@ class ToolCallExecutor:
                 error_code="tool_not_found",
             )
 
+        if tool_name == "search_knowledge":
+            logger.info(
+                "Agent tool call arguments received. tool_name=%s arguments=%s",
+                tool_name,
+                self._safe_arguments_preview(arguments),
+            )
+
         try:
             parsed_arguments = self._parse_arguments(arguments)
             input_data = tool.input_schema.model_validate(parsed_arguments)
-        except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
+        except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+            if tool_name == "search_knowledge":
+                parsed_arguments = (
+                    arguments if isinstance(arguments, dict) else {}
+                )
+                logger.info(
+                    "Knowledge search tool arguments invalid. query=%s top_k=%s "
+                    "exception_type=%s error=%s",
+                    parsed_arguments.get("query"),
+                    parsed_arguments.get("top_k"),
+                    type(exc).__name__,
+                    exc,
+                )
             return self._error_result(
                 tool_name=tool_name,
                 error_code="invalid_arguments",
@@ -42,6 +61,8 @@ class ToolCallExecutor:
         try:
             if tool_name == "get_device_status":
                 result = agent_tools.run_get_device_status_tool(self.db, input_data)
+            elif tool_name == "get_device_alarms":
+                result = agent_tools.run_get_device_alarms_tool(self.db, input_data)
             elif tool_name == "search_knowledge":
                 result = agent_tools.run_search_knowledge_tool(input_data)
             else:
@@ -91,3 +112,14 @@ class ToolCallExecutor:
             "result": {},
             "error": error_code,
         }
+
+    def _safe_arguments_preview(self, arguments: dict[str, Any] | str) -> str:
+        if isinstance(arguments, dict):
+            preview = repr(arguments)
+        else:
+            preview = arguments
+
+        if len(preview) > 1000:
+            return f"{preview[:1000]}..."
+
+        return preview

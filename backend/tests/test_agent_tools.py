@@ -197,6 +197,8 @@ def test_knowledge_tool_returns_results(monkeypatch: pytest.MonkeyPatch) -> None
     assert result.ok is True
     assert result.results[0].source == "manual.md#chunk-0"
     assert result.results[0].distance == 0.31
+    assert result.results[0].vector_score == 0.76
+    assert result.results[0].rerank_score == 0.93
     assert result.warnings == []
 
 
@@ -277,4 +279,6 @@ def _knowledge_result(distance: float) -> KnowledgeSearchResult:
         content="E101 means high temperature.",
         source="manual.md#chunk-0",
         distance=distance,
+        vector_score=0.76,
+        rerank_score=0.93,
     )
